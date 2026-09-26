@@ -68,7 +68,9 @@ test("comment follow-up includes verified-side coordinates and appends configura
 	assert.match(prompt, /discuss discrepancies before editing/i);
 	assert.match(prompt, /Do not change rules without my explicit approval/);
 	assert.ok(prompt.endsWith(append));
-	assert.doesNotMatch(buildCommentFollowUp([draft]), /discuss discrepancies before editing/i);
+	const defaultPrompt = buildCommentFollowUp([draft]);
+	assert.match(defaultPrompt, /discuss discrepancies before editing/i);
+	assert.doesNotMatch(defaultPrompt, /Do not change rules without my explicit approval/);
 	assert.doesNotMatch(prompt, /no changes requested/i);
 });
 

@@ -227,10 +227,9 @@ async function collectUntracked(root: string, budget: SnapshotBudget): Promise<R
 
 function sanitizePatchForDelta(patch: string): string {
 	return patch
-		.replace(/\r(?=\n)/g, "")
 		.replace(/\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~])/g, (sequence) => `\\x1b${sequence.slice(1)}`)
 		.replace(/\x1b/g, "\\x1b")
-		.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, (control) =>
+		.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (control) =>
 			`\\x${control.codePointAt(0)!.toString(16).padStart(2, "0")}`);
 }
 
