@@ -70,7 +70,7 @@ test("collects a tracked diff and maps added and removed rows against Git", { sk
 		assert.equal(section.newFile, "demo.txt");
 		assert.ok(mapped(section, "demo.txt", "old", 2));
 		assert.ok(mapped(section, "demo.txt", "new", 2));
-		assert.ok(section.rows.some(({ text }) => text.includes("Δ demo.txt")));
+		assert.ok(section.rows.some(({ text }) => stripTerminalControls(text).includes("added")));
 		assert.ok(section.rows.some(({ text }) => text.includes("\x1b[")), "retain Delta SGR sequences for Pi's TUI renderer");
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });

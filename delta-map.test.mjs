@@ -118,7 +118,7 @@ test("maps real Delta normal output, including its hunk decorations and ANSI res
 		execFileSync("git", ["-c", "user.name=Review Test", "-c", "user.email=review@example.invalid", "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture"], { cwd });
 		writeFileSync(join(cwd, "demo.txt"), "context\nadded\nend\n");
 		const source = execFileSync("git", ["--no-pager", "diff", "--no-ext-diff", "--no-color", "--unified=3", "HEAD", "--"], { cwd, encoding: "utf8" });
-		const delta = spawnSync("delta", ["--paging", "never", "--width", "100"], { cwd, input: source, encoding: "utf8" });
+		const delta = spawnSync("delta", ["--paging", "never", "--line-numbers", "--width", "100"], { cwd, input: source, encoding: "utf8" });
 		assert.equal(delta.status, 0, delta.stderr);
 		const rows = mapDeltaRows("demo.txt", source, delta.stdout, { oldFile: "demo.txt", newFile: "demo.txt" });
 		assert.ok(rows.some(({ mapping }) => mapping?.side === "old" && mapping.line === 2));

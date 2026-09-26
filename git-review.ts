@@ -246,7 +246,7 @@ function sanitizeDeltaLine(text: string): string {
 
 async function renderWithDelta(section: ReviewSection, width: number, repoRoot: string, budget: SnapshotBudget): Promise<ReviewSection> {
 	const patch = sanitizePatchForDelta(section.patch);
-	const output = await run("delta", ["--paging", "never", "--width", String(Math.max(30, width))], {
+	const output = await run("delta", ["--paging", "never", "--line-numbers", "--width", String(Math.max(30, width))], {
 		cwd: repoRoot,
 		budget,
 		input: patch,
