@@ -1,4 +1,4 @@
-import type { DeltaRow } from "./delta-map.ts";
+import type { ReviewDiffRow } from "./delta-map.ts";
 import type { ReviewPromptConfig } from "./review-config.ts";
 
 export type ReviewDraft = {
@@ -17,7 +17,7 @@ export type ReviewTarget = Omit<ReviewDraft, "id" | "text">;
 export type ReviewSectionState = {
 	key: string;
 	patchHash: string;
-	rows: DeltaRow[];
+	rows: ReviewDiffRow[];
 };
 
 export type ResolvedDraft = ReviewDraft & { stale: boolean };

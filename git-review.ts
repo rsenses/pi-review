@@ -1,6 +1,9 @@
+import { accessSync, constants as fsConstants, existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mapDeltaRows, type DeltaRow } from "./delta-map.ts";
+import { delimiter, resolve } from "node:path";
+import { mapDeltaRows, parseUnifiedPatch, type ReviewDiffRow } from "./delta-map.ts";
+import { escapeTerminalControls } from "./terminal.ts";
 
 const MAX_OUTPUT_BYTES = 24 * 1024 * 1024;
 const MAX_SNAPSHOT_OUTPUT_BYTES = 64 * 1024 * 1024;
@@ -12,6 +15,8 @@ type FileChange = {
 	status: string;
 	oldFile: string | null;
 	newFile: string | null;
+	oldMode: string;
+	newMode: string;
 };
 
 export type ReviewSection = {
@@ -22,7 +27,8 @@ export type ReviewSection = {
 	displayFile: string;
 	patch: string;
 	patchHash: string;
-	rows: DeltaRow[];
+	isSubmodule: boolean;
+	rows: ReviewDiffRow[];
 };
 
 export type ReviewSnapshot = {
@@ -44,7 +50,30 @@ type CommandOptions = {
 	budget: SnapshotBudget;
 	input?: string;
 	allowedExitCodes?: number[];
+	allowMissingExecutable?: boolean;
 };
+
+function executableOnPath(command: string, cwd: string): boolean {
+	const pathValue = process.env.PATH ?? (process.platform === "win32" ? process.env.Path ?? "" : "/usr/bin:/bin");
+	const directories = pathValue.split(delimiter);
+	const extensions = process.platform === "win32"
+		? ["", ...(process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";")]
+		: [""];
+	const mode = process.platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK;
+	return directories.some((directory) => extensions.some((extension) => {
+		try {
+			accessSync(resolve(cwd, directory || ".", `${command}${extension}`), mode);
+			return true;
+		} catch {
+			return false;
+		}
+	}));
+}
+
+function isMissingExecutable(error: unknown, command: string, cwd: string): boolean {
+	const spawnError = error as NodeJS.ErrnoException & { path?: string };
+	return spawnError.code === "ENOENT" && spawnError.path === command && existsSync(cwd) && !executableOnPath(command, cwd);
+}
 
 function cancelSnapshot(budget: SnapshotBudget): void {
 	for (const cancel of [...budget.cancelers]) cancel();
@@ -57,7 +86,9 @@ function reserveSections(budget: SnapshotBudget, count: number): void {
 	budget.sectionCount += count;
 }
 
-function run(command: string, args: string[], options: CommandOptions): Promise<string> {
+function run(command: string, args: string[], options: CommandOptions & { allowMissingExecutable: true }): Promise<string | null>;
+function run(command: string, args: string[], options: CommandOptions): Promise<string>;
+function run(command: string, args: string[], options: CommandOptions): Promise<string | null> {
 	return new Promise((resolve, reject) => {
 		if (options.budget.failure) return reject(new Error(options.budget.failure));
 		const remainingMs = options.budget.deadline - Date.now();
@@ -70,6 +101,7 @@ function run(command: string, args: string[], options: CommandOptions): Promise<
 		const stdout: Buffer[] = [];
 		const stderr: Buffer[] = [];
 		let commandBytes = 0;
+		let spawnError = false;
 		const cancel = () => child.kill("SIGTERM");
 		options.budget.cancelers.add(cancel);
 		const timeout = setTimeout(() => {
@@ -92,8 +124,13 @@ function run(command: string, args: string[], options: CommandOptions): Promise<
 		child.stderr.on("data", collect(stderr));
 		child.stdin.on("error", () => {});
 		child.on("error", (error) => {
+			spawnError = true;
 			clearTimeout(timeout);
 			options.budget.cancelers.delete(cancel);
+			if (options.allowMissingExecutable && isMissingExecutable(error, command, options.cwd)) {
+				resolve(null);
+				return;
+			}
 			options.budget.failure ??= error.message;
 			cancelSnapshot(options.budget);
 			reject(error);
@@ -101,6 +138,7 @@ function run(command: string, args: string[], options: CommandOptions): Promise<
 		child.on("close", (code) => {
 			clearTimeout(timeout);
 			options.budget.cancelers.delete(cancel);
+			if (spawnError) return;
 			if (options.budget.failure) return reject(new Error(options.budget.failure));
 			const allowed = options.allowedExitCodes ?? [0];
 			if (code === null || !allowed.includes(code)) {
@@ -120,29 +158,101 @@ function splitNul(value: string): string[] {
 	return value.split("\0").filter((part) => part.length > 0);
 }
 
-function parseNameStatus(value: string): FileChange[] {
-	const tokens = splitNul(value);
+type RawPatch = { changes: FileChange[]; patch: string };
+
+function parseRawPatch(output: string): RawPatch {
+	if (!output) return { changes: [], patch: "" };
+	const patchStart = output.indexOf("\0\0diff --git ");
+	if (patchStart < 0) throw new Error("Git raw metadata had no unified patch; refusing line annotations");
+	const tokens = splitNul(output.slice(0, patchStart));
 	const changes: FileChange[] = [];
 	for (let i = 0; i < tokens.length;) {
-		const status = tokens[i++];
-		if (!status) break;
+		const record = tokens[i++];
+		const match = /^:(\d{6}) (\d{6}) [0-9a-f]+ [0-9a-f]+ ([A-Z][0-9]*)$/i.exec(record);
+		if (!match) throw new Error("Git returned malformed raw diff metadata; refusing line annotations");
+		const status = match[3];
 		const kind = status[0];
+		const oldFile = tokens[i++];
+		if (oldFile === undefined) throw new Error("Git returned an incomplete raw diff record");
 		if (kind === "R" || kind === "C") {
-			const oldFile = tokens[i++];
 			const newFile = tokens[i++];
-			if (oldFile === undefined || newFile === undefined) throw new Error("Git returned an incomplete rename record");
-			changes.push({ status, oldFile, newFile });
+			if (newFile === undefined) throw new Error("Git returned an incomplete rename record");
+			changes.push({ status, oldFile, newFile, oldMode: match[1], newMode: match[2] });
 			continue;
 		}
-		const file = tokens[i++];
-		if (file === undefined) throw new Error("Git returned an incomplete file record");
+		if (!["A", "D", "M", "T", "U", "X", "B"].includes(kind)) {
+			throw new Error(`Git returned unsupported raw diff status ${status}; refusing line annotations`);
+		}
 		changes.push({
 			status,
-			oldFile: kind === "A" ? null : file,
-			newFile: kind === "D" ? null : file,
+			oldFile: kind === "A" ? null : oldFile,
+			newFile: kind === "D" ? null : oldFile,
+			oldMode: match[1],
+			newMode: match[2],
 		});
 	}
-	return changes;
+	return { changes, patch: output.slice(patchStart + 2) };
+}
+
+function decodeGitPath(value: string): string | null {
+	if (!value.startsWith('"')) return value.includes("\ufffd") ? null : value;
+	if (!value.endsWith('"')) return null;
+	const bytes: number[] = [];
+	for (let index = 1; index < value.length - 1;) {
+		if (value[index] !== "\\") {
+			if (value[index] === '"') return null;
+			const point = value.codePointAt(index)!;
+			bytes.push(...Buffer.from(String.fromCodePoint(point), "utf8"));
+			index += point > 0xffff ? 2 : 1;
+			continue;
+		}
+		const escaped = value[index + 1];
+		const simple: Record<string, number> = { '"': 34, "\\": 92, a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13 };
+		if (escaped !== undefined && Object.hasOwn(simple, escaped)) {
+			bytes.push(simple[escaped]);
+			index += 2;
+			continue;
+		}
+		if (!/[0-7]/.test(escaped ?? "")) return null;
+		let octal = "";
+		while (octal.length < 3 && /[0-7]/.test(value[index + 1] ?? "")) octal += value[++index];
+		const byte = Number.parseInt(octal, 8);
+		if (byte > 0xff) return null;
+		bytes.push(byte);
+		index++;
+	}
+	const buffer = Buffer.from(bytes);
+	const decoded = buffer.toString("utf8");
+	return Buffer.from(decoded, "utf8").equals(buffer) && !decoded.includes("\ufffd") ? decoded : null;
+}
+
+function patchHeaderMatches(change: FileChange, patch: string): boolean {
+	const newline = patch.indexOf("\n");
+	if (newline < 0) return false;
+	const firstLine = patch.slice(0, newline);
+	if (!firstLine.startsWith("diff --git ")) return false;
+	const paths = firstLine.slice("diff --git ".length);
+	const expectedOld = change.oldFile ?? change.newFile;
+	const expectedNew = change.newFile ?? change.oldFile;
+	if (expectedOld === null || expectedNew === null) return false;
+	for (let split = 1; split < paths.length; split++) {
+		if (paths[split] !== " ") continue;
+		const oldPath = decodeGitPath(paths.slice(0, split));
+		const newPath = decodeGitPath(paths.slice(split + 1));
+		if (oldPath === `a/${expectedOld}` && newPath === `b/${expectedNew}`) return true;
+	}
+	return false;
+}
+
+export function verifyPatchChanges(changes: FileChange[], patches: string[]): void {
+	if (changes.length !== patches.length) {
+		throw new Error(`Git raw metadata and patch disagree (${changes.length} files, ${patches.length} patches); refusing line annotations`);
+	}
+	for (let index = 0; index < changes.length; index++) {
+		if (!patchHeaderMatches(changes[index], patches[index])) {
+			throw new Error(`Git raw metadata does not match patch ${index + 1}; refusing line annotations`);
+		}
+	}
 }
 
 function splitFilePatches(patch: string): string[] {
@@ -154,10 +264,12 @@ function splitFilePatches(patch: string): string[] {
 	return starts.map((start, index) => patch.slice(start, starts[index + 1] ?? patch.length));
 }
 
-function layerArgs(layer: "staged" | "worktree" | "head", nameStatus: boolean): string[] {
-	const args = ["--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=3", "--find-renames"];
+function layerArgs(layer: "staged" | "worktree" | "head"): string[] {
+	const args = [
+		"--no-pager", "diff", "--patch-with-raw", "-z", "--default-prefix",
+		"--no-ext-diff", "--no-textconv", "--no-color", "--ignore-submodules=none", "--submodule=short", "--find-renames",
+	];
 	if (layer === "staged") args.push("--cached", "--root");
-	if (nameStatus) args.push("--name-status", "-z");
 	if (layer === "head") args.push("HEAD");
 	args.push("--");
 	return args;
@@ -173,7 +285,8 @@ function changeLabel(change: FileChange, layer: string): string {
 			: change.status.startsWith("A") ? "added"
 			: change.status.startsWith("D") ? "deleted"
 				: change.status.startsWith("T") ? "type changed"
-					: "modified";
+					: change.status.startsWith("C") ? "copied"
+						: "modified";
 	return layer === "head" || change.status === "??" ? `${status} · ${rename}` : `${layer} · ${status} · ${rename}`;
 }
 
@@ -191,46 +304,9 @@ function makeSection(change: FileChange, patch: string, layer: string): ReviewSe
 		displayFile,
 		patch,
 		patchHash: createHash("sha256").update(patch).digest("hex"),
+		isSubmodule: change.oldMode === "160000" || change.newMode === "160000",
 		rows: [],
 	};
-}
-
-async function collectLayer(root: string, layer: "staged" | "worktree" | "head", budget: SnapshotBudget): Promise<ReviewSection[]> {
-	const [statusText, patch] = await Promise.all([
-		run("git", layerArgs(layer, true), { cwd: root, budget }),
-		run("git", layerArgs(layer, false), { cwd: root, budget }),
-	]);
-	const changes = parseNameStatus(statusText);
-	reserveSections(budget, changes.length);
-	const patches = splitFilePatches(patch);
-	if (changes.length !== patches.length) {
-		throw new Error(`Git file list and patch disagree (${changes.length} files, ${patches.length} patches); refusing line annotations`);
-	}
-	return changes.map((change, index) => makeSection(change, patches[index], layer));
-}
-
-async function collectUntracked(root: string, budget: SnapshotBudget): Promise<ReviewSection[]> {
-	const files = splitNul(await run("git", ["--no-pager", "ls-files", "--others", "--exclude-standard", "-z"], { cwd: root, budget }));
-	reserveSections(budget, files.length);
-	const sections: ReviewSection[] = [];
-	for (const file of files) {
-		const patch = await run(
-			"git",
-			["--no-pager", "diff", "--no-index", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=3", "--", "/dev/null", file],
-			{ cwd: root, budget, allowedExitCodes: [0, 1] },
-		);
-		if (!patch) continue;
-		sections.push(makeSection({ status: "??", oldFile: null, newFile: file }, patch, "untracked"));
-	}
-	return sections;
-}
-
-function sanitizePatchForDelta(patch: string): string {
-	return patch
-		.replace(/\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~])/g, (sequence) => `\\x1b${sequence.slice(1)}`)
-		.replace(/\x1b/g, "\\x1b")
-		.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (control) =>
-			`\\x${control.codePointAt(0)!.toString(16).padStart(2, "0")}`);
 }
 
 function sanitizeDeltaLine(text: string): string {
@@ -244,26 +320,81 @@ function sanitizeDeltaLine(text: string): string {
 			`\\x${control.codePointAt(0)!.toString(16).padStart(2, "0")}`);
 }
 
-async function renderWithDelta(section: ReviewSection, width: number, repoRoot: string, budget: SnapshotBudget): Promise<ReviewSection> {
-	const patch = sanitizePatchForDelta(section.patch);
-	const output = await run("delta", ["--paging", "never", "--line-numbers", "--width", String(Math.max(30, width))], {
-		cwd: repoRoot,
-		budget,
-		input: patch,
+function renderRawPatch(section: ReviewSection): ReviewDiffRow[] {
+	const parsed = parseUnifiedPatch(section.patch);
+	const rowsByPatchLine = new Map(parsed?.map((row) => [row.patchLineIndex, row]) ?? []);
+	const lines = section.patch.split("\n");
+	if (lines.at(-1) === "") lines.pop();
+	return lines.map((line, index) => {
+		const text = escapeTerminalControls(line);
+		const source = rowsByPatchLine.get(index);
+		if (!source || !parsed || section.isSubmodule) return { text };
+		const side = source.kind === "delete" ? "old" : "new";
+		const file = side === "old" ? section.oldFile : section.newFile;
+		if (!file) return { text };
+		return {
+			text,
+			mapping: {
+				file,
+				side,
+				line: side === "old" ? source.oldLine! : source.newLine!,
+			},
+		};
 	});
-	const mapped = mapDeltaRows(section.displayFile, patch, output, {
+}
+
+async function renderWithDelta(
+	section: ReviewSection,
+	width: number,
+	cwd: string,
+	budget: SnapshotBudget,
+): Promise<ReviewDiffRow[] | null> {
+	const safePatch = escapeTerminalControls(section.patch);
+	const output = await run(
+		"delta",
+		["--paging", "never", "--line-numbers", "--width", String(Math.max(30, width))],
+		{ cwd, budget, input: safePatch, allowMissingExecutable: true },
+	);
+	if (output === null) return null;
+	const mapped = mapDeltaRows(section.displayFile, safePatch, output, {
 		oldFile: section.oldFile,
 		newFile: section.newFile,
 	});
-	const isSubmodule = /\b160000\b/.test(section.patch) && section.patch.includes("Subproject commit ");
-	return {
-		...section,
-		rows: mapped.map((row) => ({
-			...row,
-			text: sanitizeDeltaLine(row.text),
-			mapping: isSubmodule ? undefined : row.mapping,
-		})),
-	};
+	return mapped.map((row) => ({
+		...row,
+		text: sanitizeDeltaLine(row.text),
+		mapping: section.isSubmodule ? undefined : row.mapping,
+	}));
+}
+
+async function collectLayer(root: string, layer: "staged" | "worktree" | "head", budget: SnapshotBudget): Promise<ReviewSection[]> {
+	const { changes, patch } = parseRawPatch(await run("git", layerArgs(layer), { cwd: root, budget }));
+	reserveSections(budget, changes.length);
+	const patches = splitFilePatches(patch);
+	verifyPatchChanges(changes, patches);
+	return changes.map((change, index) => makeSection(change, patches[index], layer));
+}
+
+async function collectUntracked(root: string, budget: SnapshotBudget): Promise<ReviewSection[]> {
+	const files = splitNul(await run("git", ["--no-pager", "ls-files", "--others", "--exclude-standard", "-z"], { cwd: root, budget }));
+	reserveSections(budget, files.length);
+	const sections: ReviewSection[] = [];
+	for (const file of files) {
+		const output = await run(
+			"git",
+			["--no-pager", "diff", "--no-index", "--patch-with-raw", "-z", "--default-prefix", "--no-ext-diff", "--no-textconv", "--no-color", "--", "/dev/null", file],
+			{ cwd: root, budget, allowedExitCodes: [0, 1] },
+		);
+		const { changes, patch } = parseRawPatch(output);
+		if (!patch) continue;
+		const patches = splitFilePatches(patch);
+		verifyPatchChanges(changes, patches);
+		if (changes.length !== 1 || changes[0].status[0] !== "A" || changes[0].oldFile !== null || changes[0].newFile !== file) {
+			throw new Error(`Git untracked-file metadata does not match ${file}; refusing line annotations`);
+		}
+		sections.push(makeSection(changes[0], patches[0], "untracked"));
+	}
+	return sections;
 }
 
 function snapshotSignature(sections: ReviewSection[]): string {
@@ -293,11 +424,20 @@ export async function loadSnapshot(cwd: string, width: number): Promise<ReviewSn
 		sections = [...staged, ...worktree];
 	}
 	sections.push(...await collectUntracked(repoRoot, budget));
+	let deltaMissing = false;
 	const rendered: ReviewSection[] = [];
 	const batchSize = 6;
 	for (let start = 0; start < sections.length; start += batchSize) {
 		const batch = sections.slice(start, start + batchSize);
-		rendered.push(...await Promise.all(batch.map((section) => renderWithDelta(section, width, repoRoot, budget))));
+		rendered.push(...await Promise.all(batch.map(async (section) => {
+			if (deltaMissing) return { ...section, rows: renderRawPatch(section) };
+			const rows = await renderWithDelta(section, width, repoRoot, budget);
+			if (rows === null) {
+				deltaMissing = true;
+				return { ...section, rows: renderRawPatch(section) };
+			}
+			return { ...section, rows };
+		})));
 	}
 	return { repoRoot, sections: rendered, signature: snapshotSignature(rendered) };
 }

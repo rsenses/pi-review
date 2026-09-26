@@ -35,7 +35,9 @@ export function loadReviewPromptConfig(agentDir: string): ReviewPromptConfig {
 	if (!isRecord(config)) throw new Error(`pi-review config must be an object: ${configPath}`);
 
 	const prompt = config.prompt;
-	if (prompt === undefined) return { prepend: null, append: null, comments: null, validation: null };
+	if (prompt === undefined) {
+		return { prepend: null, append: null, comments: null, validation: null };
+	}
 	if (!isRecord(prompt)) throw new Error(`pi-review config prompt must be an object: ${configPath}`);
 
 	const result: ReviewPromptConfig = { prepend: null, append: null, comments: null, validation: null };

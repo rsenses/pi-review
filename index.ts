@@ -6,7 +6,7 @@ import type { Component, EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { Editor, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { loadSnapshot, type ReviewSection, type ReviewSnapshot } from "./git-review.ts";
 import { loadReviewPromptConfig, type ReviewPromptConfig } from "./review-config.ts";
-import { preserveSelectedBackground, stripTerminalControls } from "./delta-map.ts";
+import { preserveSelectedBackground, stripTerminalControls } from "./terminal.ts";
 import {
 	draftTargetKey,
 	keepCursorVisible,
@@ -33,7 +33,7 @@ type ReviewResult = { action: "close" } | { action: "submit"; message: string; c
 
 type ReviewRow =
 	| { kind: "file"; sectionIndex: number }
-	| { kind: "delta"; sectionIndex: number; deltaIndex: number }
+	| { kind: "diff"; sectionIndex: number; rowIndex: number }
 	| { kind: "comment"; sectionIndex: number; draftId: string }
 	| { kind: "draft"; draftId: string }
 	| { kind: "info"; id: string; text: string };
@@ -124,16 +124,16 @@ function targetFromRow(row: ReviewRow, sections: ReviewSection[]): ReviewTarget 
 			patchHash: section.patchHash,
 		};
 	}
-	if (row.kind !== "delta") return undefined;
+	if (row.kind !== "diff") return undefined;
 	const section = sections[row.sectionIndex];
-	const delta = section?.rows[row.deltaIndex];
-	if (!section || !delta?.mapping) return undefined;
+	const rendered = section?.rows[row.rowIndex];
+	if (!section || !rendered?.mapping) return undefined;
 	return {
 		kind: "line",
 		sectionKey: section.key,
-		file: delta.mapping.file,
-		side: delta.mapping.side,
-		line: delta.mapping.line,
+		file: rendered.mapping.file,
+		side: rendered.mapping.side,
+		line: rendered.mapping.line,
 		patchHash: section.patchHash,
 	};
 }
@@ -141,12 +141,12 @@ function targetFromRow(row: ReviewRow, sections: ReviewSection[]): ReviewTarget 
 function rowIdentity(row: ReviewRow | undefined, sections: ReviewSection[]): string {
 	if (!row) return "";
 	if (row.kind === "file") return `file:${sections[row.sectionIndex]?.key ?? row.sectionIndex}`;
-	if (row.kind === "delta") {
+	if (row.kind === "diff") {
 		const section = sections[row.sectionIndex];
-		const mapping = section?.rows[row.deltaIndex]?.mapping;
+		const mapping = section?.rows[row.rowIndex]?.mapping;
 		return mapping
 			? `line:${section?.key}:${mapping.file}:${mapping.side}:${mapping.line}`
-			: `delta:${section?.key}:${row.deltaIndex}`;
+			: `diff:${section?.key}:${row.rowIndex}`;
 	}
 	if (row.kind === "draft" || row.kind === "comment") return `draft:${row.draftId}`;
 	return `info:${row.id}`;
@@ -183,7 +183,7 @@ class ReviewScreen implements Component {
 		return reconcileDrafts(this.drafts, this.snapshot.sections);
 	}
 
-	private buildRows(resolved = this.resolvedDrafts()): ReviewRow[] {
+	private buildRows(resolved: ResolvedDraft[] = this.resolvedDrafts()): ReviewRow[] {
 		const rows: ReviewRow[] = [];
 		const fileComments = new Map<string, ResolvedDraft[]>();
 		const lineComments = new Map<string, ResolvedDraft[]>();
@@ -216,16 +216,16 @@ class ReviewScreen implements Component {
 			for (const draft of fileComments.get(draftTargetKey(fileTarget)) ?? []) {
 				rows.push({ kind: "comment", sectionIndex, draftId: draft.id });
 			}
-			for (let deltaIndex = 0; deltaIndex < section.rows.length; deltaIndex++) {
-				const delta = section.rows[deltaIndex];
-				rows.push({ kind: "delta", sectionIndex, deltaIndex });
-				if (!delta.mapping) continue;
+			for (let rowIndex = 0; rowIndex < section.rows.length; rowIndex++) {
+				const rendered = section.rows[rowIndex];
+				rows.push({ kind: "diff", sectionIndex, rowIndex });
+				if (!rendered.mapping) continue;
 				const lineTarget: ReviewTarget = {
 					kind: "line",
 					sectionKey: section.key,
-					file: delta.mapping.file,
-					side: delta.mapping.side,
-					line: delta.mapping.line,
+					file: rendered.mapping.file,
+					side: rendered.mapping.side,
+					line: rendered.mapping.line,
 					patchHash: section.patchHash,
 				};
 				for (const draft of lineComments.get(draftTargetKey(lineTarget)) ?? []) {
@@ -508,9 +508,9 @@ class ReviewScreen implements Component {
 		if (row.kind === "file") {
 			const section = this.snapshot.sections[row.sectionIndex];
 			text = this.theme.fg("accent", this.theme.bold(`▸ ${safePlainText(section?.label ?? "file")}  [c: comment on file]`));
-		} else if (row.kind === "delta") {
+		} else if (row.kind === "diff") {
 			const section = this.snapshot.sections[row.sectionIndex];
-			text = section?.rows[row.deltaIndex]?.text ?? "";
+			text = section?.rows[row.rowIndex]?.text ?? "";
 		} else if (row.kind === "comment") {
 			const draft = draftsById.get(row.draftId);
 			text = `${this.theme.fg("success", `    ↳ comment: ${excerpt(draft?.text ?? "")}`)}${this.theme.fg("dim", "  [c edit · x remove]")}`;
@@ -525,7 +525,7 @@ class ReviewScreen implements Component {
 		const line = cursor + text;
 		if (!selected) return truncateToWidth(line, availableWidth);
 		const clipped = truncateToWidth(line, availableWidth, "");
-		const selectedLine = row.kind === "delta"
+		const selectedLine = row.kind === "diff"
 			? preserveSelectedBackground(clipped, this.theme.getBgAnsi("selectedBg"))
 			: clipped;
 		const padding = " ".repeat(Math.max(0, availableWidth - visibleWidth(selectedLine)));
@@ -535,7 +535,7 @@ class ReviewScreen implements Component {
 
 export default function (pi: ExtensionAPI): void {
 	pi.registerCommand("review", {
-		description: "Review the current repository's Git changes in Delta (Pi CWD); paths are not accepted",
+		description: "Review the current repository's Git changes (Pi CWD); paths are not accepted",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			if (ctx.mode !== "tui" || !ctx.hasUI) {
 				ctx.ui.notify("/review requires Pi's interactive TUI.", "warning");
@@ -560,7 +560,16 @@ export default function (pi: ExtensionAPI): void {
 				const snapshot = await loadSnapshot(ctx.cwd, width);
 				const drafts = loadDrafts(ctx, snapshot.repoRoot);
 				const result = await ctx.ui.custom<ReviewResult>(
-					(tui, theme, _keybindings, done) => new ReviewScreen(pi, ctx, tui, theme, done, snapshot, drafts, reviewPromptConfig),
+					(tui, theme, _keybindings, done) => new ReviewScreen(
+						pi,
+						ctx,
+						tui,
+						theme,
+						done,
+						snapshot,
+						drafts,
+						reviewPromptConfig,
+					),
 				);
 				if (result.action === "submit") {
 					pi.sendUserMessage(result.message, { deliverAs: "followUp" });

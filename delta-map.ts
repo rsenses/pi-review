@@ -1,66 +1,21 @@
+import { stripTerminalControls } from "./terminal.ts";
+
 export type PatchRow = {
 	kind: "context" | "delete" | "add";
 	oldLine?: number;
 	newLine?: number;
 	content: string;
+	patchLineIndex: number;
 };
 
-export type DeltaRow = {
+export type ReviewDiffRow = {
 	text: string;
 	mapping?: { file: string; side: "old" | "new"; line: number };
 };
 
-/** Remove terminal controls for parsing only; callers retain the original display text. */
-export function stripTerminalControls(text: string): string {
-	return text
-		.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
-		.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
-}
-
-export function preserveSelectedBackground(text: string, selectedBackground: string): string {
-	return text.replace(/\x1b\[([0-?]*)m/g, (_sequence, parameters: string) => {
-		const codes = parameters ? parameters.split(";") : ["0"];
-		let result = "";
-		let retained: string[] = [];
-		const flush = () => {
-			if (retained.length === 0) return;
-			result += `\x1b[${retained.join(";")}m`;
-			retained = [];
-		};
-
-		for (let index = 0; index < codes.length; index++) {
-			const parameter = codes[index];
-			const code = Number(parameter.split(":")[0]);
-			if (code === 0) {
-				flush();
-				result += `\x1b[0m${selectedBackground}`;
-				continue;
-			}
-			if (code === 48) {
-				flush();
-				if (!parameter.includes(":")) {
-					if (codes[index + 1] === "2") index += 4;
-					else if (codes[index + 1] === "5") index += 2;
-				}
-				continue;
-			}
-			if (code === 49 || (code >= 40 && code <= 47) || (code >= 100 && code <= 107)) continue;
-			if (code === 38 && !parameter.includes(":")) {
-				const components = codes[index + 1] === "2" ? 4 : codes[index + 1] === "5" ? 2 : 0;
-				retained.push(...codes.slice(index, index + components + 1));
-				index += components;
-				continue;
-			}
-			retained.push(parameter);
-		}
-		flush();
-		return result;
-	});
-}
-
 /** Parse one complete unified Git patch. Invalid or incomplete patches fail closed. */
 export function parseUnifiedPatch(patch: string): PatchRow[] | null {
-	const lines = stripTerminalControls(patch).split(/\r?\n/);
+	const lines = patch.split(/\r?\n/);
 	const rows: PatchRow[] = [];
 	let inHunk = false;
 	let oldLine = 0;
@@ -69,7 +24,8 @@ export function parseUnifiedPatch(patch: string): PatchRow[] | null {
 	let newRemaining = 0;
 	let hunks = 0;
 
-	for (const line of lines) {
+	for (const [patchLineIndex, rawLine] of lines.entries()) {
+		const line = stripTerminalControls(rawLine);
 		if (line.startsWith("@@")) {
 			if (inHunk && (oldRemaining !== 0 || newRemaining !== 0)) return null;
 			const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?:.*)$/.exec(line);
@@ -91,14 +47,14 @@ export function parseUnifiedPatch(patch: string): PatchRow[] | null {
 		const marker = line[0];
 		const content = line.slice(1);
 		if (marker === " " && oldRemaining > 0 && newRemaining > 0) {
-			rows.push({ kind: "context", oldLine: oldLine++, newLine: newLine++, content });
+			rows.push({ kind: "context", oldLine: oldLine++, newLine: newLine++, content, patchLineIndex });
 			oldRemaining--;
 			newRemaining--;
 		} else if (marker === "-" && oldRemaining > 0) {
-			rows.push({ kind: "delete", oldLine: oldLine++, content });
+			rows.push({ kind: "delete", oldLine: oldLine++, content, patchLineIndex });
 			oldRemaining--;
 		} else if (marker === "+" && newRemaining > 0) {
-			rows.push({ kind: "add", newLine: newLine++, content });
+			rows.push({ kind: "add", newLine: newLine++, content, patchLineIndex });
 			newRemaining--;
 		} else {
 			return null;
@@ -128,7 +84,7 @@ export function mapDeltaRows(
 	patch: string,
 	deltaOutput: string,
 	paths?: { oldFile: string | null; newFile: string | null },
-): DeltaRow[] {
+): ReviewDiffRow[] {
 	const source = parseUnifiedPatch(patch);
 	const outputRows = deltaOutput.split("\n");
 	if (outputRows.at(-1) === "") outputRows.pop();

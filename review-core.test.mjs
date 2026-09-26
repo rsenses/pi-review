@@ -74,6 +74,10 @@ test("comment follow-up applies optional configuration and keeps generated comme
 	assert.match(defaultPrompt, /discuss discrepancies before editing/i);
 	assert.equal(buildCommentFollowUp([draft], { prepend: null, append: null, comments: null }), defaultPrompt);
 	assert.doesNotMatch(prompt, /no changes requested/i);
+	const secondDraft = { ...draft, id: "draft-2", file: "src/b.ts", sectionKey: "src/b.ts", line: 3, text: "Check the new path too." };
+	const multiple = buildCommentFollowUp([draft, secondDraft]);
+	assert.ok(multiple.includes("> Check the deleted behavior.\n> It may regress."));
+	assert.ok(multiple.includes("> Check the new path too."));
 });
 
 test("validation prompt is the agreed Plannotator default", () => {

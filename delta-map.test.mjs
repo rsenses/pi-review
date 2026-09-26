@@ -4,7 +4,8 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mapDeltaRows, parseUnifiedPatch, preserveSelectedBackground, stripTerminalControls } from "./delta-map.ts";
+import { mapDeltaRows, parseUnifiedPatch } from "./delta-map.ts";
+import { preserveSelectedBackground, stripTerminalControls } from "./terminal.ts";
 
 const patch = `diff --git a/demo.txt b/demo.txt
 index 1111111..2222222 100644
@@ -18,10 +19,10 @@ index 1111111..2222222 100644
 
 test("parses source coordinates and maps context, deletion, and addition", () => {
 	assert.deepEqual(parseUnifiedPatch(patch), [
-		{ kind: "context", oldLine: 10, newLine: 10, content: "context" },
-		{ kind: "delete", oldLine: 11, content: "deleted" },
-		{ kind: "add", newLine: 11, content: "added" },
-		{ kind: "context", oldLine: 12, newLine: 12, content: "end" },
+		{ kind: "context", oldLine: 10, newLine: 10, content: "context", patchLineIndex: 5 },
+		{ kind: "delete", oldLine: 11, content: "deleted", patchLineIndex: 6 },
+		{ kind: "add", newLine: 11, content: "added", patchLineIndex: 7 },
+		{ kind: "context", oldLine: 12, newLine: 12, content: "end", patchLineIndex: 8 },
 	]);
 	const rendered = [
 		"10 ⋮ 10 │context\x1b[K",
