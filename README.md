@@ -7,7 +7,8 @@ Reviews are bounded to 256 diff sections, 24 MiB per subprocess, 64 MiB total su
 ## Requirements
 
 - Pi 0.87.1 or newer.
-- `git` and `delta` available on `PATH`.
+- Git available on `PATH`.
+- Delta available on `PATH`. Delta is required; if it is missing, the review fails with a clear error.
 
 ## Install
 
@@ -39,6 +40,10 @@ The optional user-level configuration lives at `~/.pi/agent/extensions/pi-review
 All four fields are optional and may be `null`. Missing or `null` `prepend`/`append` values do nothing; when provided, they are concatenated verbatim around the comment-review follow-up, so include any desired whitespace or separators. They do not affect validation.
 
 `prompt.comments` replaces the default comment-review instructions; Pi still appends the generated list of file/line comments. If missing or `null`, the existing instructions are used. `prompt.validation` replaces the no-comments validation message; if missing or `null`, the existing default is used.
+
+Git generates one canonical unified patch with NUL-delimited file metadata; pi-review verifies its old/new paths before mapping line anchors. Delta presents that patch, while Pi provides navigation, comments, drafts, stale detection and submission. Git's configured pager is never used: pi-review captures Git's output and runs Delta directly with paging disabled, line numbers enabled and the width set to the review viewport. Delta's other normal configuration (including syntax highlighting, theme and styles) remains in effect.
+
+Compatible Git diff configuration (including algorithm, indent heuristic and context) is left in place. For a verifiable patch, pi-review disables external diffs, textconv and Git colors, requires default path prefixes and short submodule summaries, and includes submodule changes. Git moved-color settings cannot color this captured patch because Git colors are disabled; Delta supplies the visual colors. No PTY or other pager is launched.
 
 ## Controls
 

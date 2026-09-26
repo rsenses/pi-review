@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { loadSnapshot } from "./git-review.ts";
+import { delimiter, join, resolve } from "node:path";
+import { loadSnapshot, verifyPatchChanges } from "./git-review.ts";
 import { stripTerminalControls } from "./delta-map.ts";
 
 const hasDelta = spawnSync("delta", ["--version"], { stdio: "ignore" }).status === 0;
@@ -22,6 +22,105 @@ function commit(cwd, message = "fixture") {
 function mapped(section, file, side, line) {
 	return section.rows.some(({ mapping }) => mapping?.file === file && mapping.side === side && mapping.line === line);
 }
+
+test("Git metadata must agree with both patch header and old/new text markers", () => {
+	const change = { status: "M", oldFile: "expected.txt", newFile: "expected.txt", isSubmodule: false };
+	const patch = "diff --git a/expected.txt b/expected.txt\n--- a/expected.txt\n+++ b/expected.txt\n@@ -1 +1 @@\n-old\n+new\n";
+	assert.doesNotThrow(() => verifyPatchChanges([change], [patch]));
+	assert.throws(() => verifyPatchChanges([change], []), /metadata and patch disagree/);
+	assert.throws(() => verifyPatchChanges([change], [patch.replace("diff --git a/expected.txt", "diff --git a/other.txt")]), /refusing line annotations/);
+	assert.throws(() => verifyPatchChanges([change], [patch.replace("+++ b/expected.txt", "+++ b/other.txt")]), /refusing line annotations/);
+	assert.throws(() => verifyPatchChanges([change], [patch.replace("--- a/expected.txt", "--- a/other.txt")]), /refusing line annotations/);
+	assert.throws(() => verifyPatchChanges([{ ...change, oldFile: 'odd"name.txt' }], ['diff --git "a/odd"name.txt" b/expected.txt\n']), /refusing line annotations/);
+});
+
+test("quoted rename/deletion and untracked paths are verified end-to-end", { skip: !hasDelta }, async () => {
+	const cwd = repo();
+	try {
+		writeFileSync(join(cwd, "old space.txt"), "one\ntwo\nthree\nfour\nfive\nsix\n");
+		writeFileSync(join(cwd, "gone\nline.txt"), "first\nsecond\n");
+		execFileSync("git", ["add", "--all"], { cwd });
+		commit(cwd);
+		execFileSync("git", ["mv", "old space.txt", 'new "name".txt'], { cwd });
+		writeFileSync(join(cwd, 'new "name".txt'), "one\ntwo\nthree\nfour\nchanged\nsix\n");
+		execFileSync("git", ["rm", "-q", "gone\nline.txt"], { cwd });
+		writeFileSync(join(cwd, "added\tfile.txt"), "fresh\n");
+		writeFileSync(join(cwd, "caf\u00e9.txt"), "unicode\n");
+		execFileSync("git", ["config", "core.quotePath", "true"], { cwd });
+		execFileSync("git", ["config", "diff.noprefix", "true"], { cwd });
+		const sections = (await loadSnapshot(cwd, 100)).sections;
+		const renamed = sections.find((section) => section.oldFile === "old space.txt");
+		assert.equal(renamed?.newFile, 'new "name".txt');
+		assert.ok(mapped(renamed, "old space.txt", "old", 5));
+		assert.ok(mapped(renamed, 'new "name".txt', "new", 5));
+		assert.ok(mapped(sections.find((section) => section.oldFile === "gone\nline.txt"), "gone\nline.txt", "old", 1));
+		assert.ok(mapped(sections.find((section) => section.newFile === "added\tfile.txt"), "added\tfile.txt", "new", 1));
+		assert.ok(mapped(sections.find((section) => section.newFile === "caf\u00e9.txt"), "caf\u00e9.txt", "new", 1));
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("Git diff context configuration survives canonical patch capture", { skip: !hasDelta }, async () => {
+	const cwd = repo();
+	try {
+		writeFileSync(join(cwd, "context.txt"), "one\ntwo\nthree\nfour\nfive\n");
+		execFileSync("git", ["add", "context.txt"], { cwd });
+		commit(cwd);
+		execFileSync("git", ["config", "diff.context", "1"], { cwd });
+		execFileSync("git", ["config", "diff.algorithm", "histogram"], { cwd });
+		writeFileSync(join(cwd, "context.txt"), "one\ntwo\nchanged\nfour\nfive\n");
+		const section = (await loadSnapshot(cwd, 100)).sections[0];
+		assert.match(section.patch, /@@ -2,3 \+2,3 @@/);
+		assert.ok(mapped(section, "context.txt", "new", 3));
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("submodule modes stay file-commentable without line anchors", { skip: !hasDelta }, async () => {
+	const cwd = repo();
+	const modulePath = join(cwd, "module");
+	try {
+		mkdirSync(modulePath);
+		execFileSync("git", ["init", "-q"], { cwd: modulePath });
+		writeFileSync(join(modulePath, "inner.txt"), "first\n");
+		execFileSync("git", ["add", "inner.txt"], { cwd: modulePath });
+		commit(modulePath);
+		execFileSync("git", ["add", "module"], { cwd, stdio: "ignore" });
+		commit(cwd);
+		writeFileSync(join(modulePath, "inner.txt"), "second\n");
+		execFileSync("git", ["add", "inner.txt"], { cwd: modulePath });
+		commit(modulePath);
+		execFileSync("git", ["config", "diff.submodule", "diff"], { cwd });
+		const section = (await loadSnapshot(cwd, 100)).sections.find(({ newFile }) => newFile === "module");
+		assert.ok(section?.isSubmodule);
+		assert.equal(section.rows.some(({ mapping }) => mapping), false);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("Delta absence reports its requirement instead of falling back", async () => {
+	const cwd = repo();
+	const bin = mkdtempSync(join(tmpdir(), "pi-review-bin-"));
+	const originalPath = process.env.PATH;
+	try {
+		writeFileSync(join(cwd, "demo.txt"), "before\n");
+		execFileSync("git", ["add", "demo.txt"], { cwd });
+		commit(cwd);
+		writeFileSync(join(cwd, "demo.txt"), "after\n");
+		const gitDirectory = (originalPath ?? "").split(delimiter).find((directory) => spawnSync(join(directory, "git"), ["--version"], { stdio: "ignore" }).status === 0);
+		assert.ok(gitDirectory);
+		symlinkSync(resolve(gitDirectory, "git"), join(bin, "git"));
+		process.env.PATH = bin;
+		await assert.rejects(loadSnapshot(cwd, 100), /Delta is required/);
+	} finally {
+		process.env.PATH = originalPath;
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(bin, { recursive: true, force: true });
+	}
+});
 
 test("source terminal controls render as literal text while line mapping remains verified", { skip: !hasDelta }, async () => {
 	const cwd = repo();

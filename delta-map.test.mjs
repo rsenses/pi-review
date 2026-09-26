@@ -80,6 +80,20 @@ test("content mismatch, duplicate candidates, and malformed patches fail closed"
 	]);
 });
 
+test("multiple hunks map in order without assigning anchors to decorations", () => {
+	const source = `diff --git a/multi.txt b/multi.txt
+--- a/multi.txt
++++ b/multi.txt
+@@ -1 +1 @@
+-old
++new
+@@ -20 +20 @@
+-later
++latest`;
+	const delta = "file header\n1 ⋮    │old\n    ⋮ 1 │new\nhunk decoration\n20 ⋮    │later\n    ⋮ 20 │latest";
+	assert.deepEqual(mapDeltaRows("multi.txt", source, delta).map(({ mapping }) => mapping?.line ?? null), [null, 1, 1, null, 20, 20]);
+});
+
 test("an extra Delta line candidate prevents speculative remapping after it", () => {
 	const rendered = ["10 ⋮ 10 │context", "11 ⋮ 11 │unexpected", "11 ⋮    │deleted", "    ⋮ 11 │added"].join("\n");
 	const rows = mapDeltaRows("demo.txt", patch, rendered);
@@ -105,6 +119,45 @@ test("renamed-file rows retain the path belonging to their old or new side", () 
 		{ file: "after/demo.txt", side: "new", line: 11 },
 		{ file: "after/demo.txt", side: "new", line: 12 },
 	]);
+});
+
+test("maps tab-indented rows using Delta's configured tab width without guessing other content", {
+	skip: spawnSync("delta", ["--version"], { stdio: "ignore" }).status !== 0,
+}, () => {
+	const source = `diff --git a/tabs.txt b/tabs.txt
+index 1111111..2222222 100644
+--- a/tabs.txt
++++ b/tabs.txt
+@@ -1,3 +1,3 @@
+ \tcontext\tmore
+-\told
++\tnew
+ tail`;
+	for (const width of [0, 2, 8]) {
+		const rendered = spawnSync("delta", ["--paging", "never", "--line-numbers", "--width", "100", "--tabs", String(width)], {
+			input: source, encoding: "utf8",
+		});
+		assert.equal(rendered.status, 0, rendered.stderr);
+		const rows = mapDeltaRows("tabs.txt", source, rendered.stdout);
+		assert.deepEqual(rows.filter(({ mapping }) => mapping).map(({ mapping }) => [mapping.side, mapping.line]), [
+			["new", 1], ["old", 2], ["new", 2], ["new", 3],
+		]);
+	}
+});
+
+test("tab expansion must match the whole row at one consistent width", () => {
+	const source = `diff --git a/tabs.txt b/tabs.txt
+--- a/tabs.txt
++++ b/tabs.txt
+@@ -1,3 +1,3 @@
+ \tfirst
+-\told
++\tnew
+ tail`;
+	const inconsistent = "1 ⋮ 1 │  first\n2 ⋮   │    old\n   ⋮ 2 │    new\n3 ⋮ 3 │tail";
+	assert.deepEqual(mapDeltaRows("tabs.txt", source, inconsistent).map(({ mapping }) => mapping?.line ?? null), [1, null, null, null]);
+	const changedText = "1 ⋮ 1 │  first\n2 ⋮   │  wrong\n   ⋮ 2 │  new";
+	assert.deepEqual(mapDeltaRows("tabs.txt", source, changedText).map(({ mapping }) => mapping?.line ?? null), [1, null, null]);
 });
 
 test("maps real Delta normal output, including its hunk decorations and ANSI resets", {

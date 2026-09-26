@@ -12,6 +12,7 @@ type FileChange = {
 	status: string;
 	oldFile: string | null;
 	newFile: string | null;
+	isSubmodule: boolean;
 };
 
 export type ReviewSection = {
@@ -22,6 +23,7 @@ export type ReviewSection = {
 	displayFile: string;
 	patch: string;
 	patchHash: string;
+	isSubmodule: boolean;
 	rows: DeltaRow[];
 };
 
@@ -94,9 +96,12 @@ function run(command: string, args: string[], options: CommandOptions): Promise<
 		child.on("error", (error) => {
 			clearTimeout(timeout);
 			options.budget.cancelers.delete(cancel);
-			options.budget.failure ??= error.message;
+			const failure = command === "delta" && (error as NodeJS.ErrnoException).code === "ENOENT"
+				? new Error("Delta is required to review diffs; install delta and ensure it is on PATH", { cause: error })
+				: error;
+			options.budget.failure ??= failure.message;
 			cancelSnapshot(options.budget);
-			reject(error);
+			reject(failure);
 		});
 		child.on("close", (code) => {
 			clearTimeout(timeout);
@@ -120,29 +125,93 @@ function splitNul(value: string): string[] {
 	return value.split("\0").filter((part) => part.length > 0);
 }
 
-function parseNameStatus(value: string): FileChange[] {
-	const tokens = splitNul(value);
+function parseRawPatch(output: string): { changes: FileChange[]; patch: string } {
+	if (!output) return { changes: [], patch: "" };
+	const start = output.indexOf("\0\0diff --git ");
+	if (start < 0) throw new Error("Git raw metadata has no patch; refusing line annotations");
+	const tokens = output.slice(0, start).split("\0");
 	const changes: FileChange[] = [];
 	for (let i = 0; i < tokens.length;) {
-		const status = tokens[i++];
-		if (!status) break;
+		const record = /^:(\d{6}) (\d{6}) [0-9a-f]+ [0-9a-f]+ ([A-Z][0-9]*)$/i.exec(tokens[i++]);
+		if (!record) throw new Error("Malformed Git raw metadata; refusing line annotations");
+		const status = record[3];
 		const kind = status[0];
-		if (kind === "R" || kind === "C") {
-			const oldFile = tokens[i++];
-			const newFile = tokens[i++];
-			if (oldFile === undefined || newFile === undefined) throw new Error("Git returned an incomplete rename record");
-			changes.push({ status, oldFile, newFile });
-			continue;
-		}
 		const file = tokens[i++];
-		if (file === undefined) throw new Error("Git returned an incomplete file record");
+		if (!file || file.includes("\ufffd")) throw new Error("Incomplete Git raw metadata; refusing line annotations");
+		const other = kind === "R" || kind === "C" ? tokens[i++] : file;
+		if (!other || other.includes("\ufffd") || !"ACDMRTUXB".includes(kind)) throw new Error("Unsupported Git raw metadata; refusing line annotations");
 		changes.push({
 			status,
 			oldFile: kind === "A" ? null : file,
-			newFile: kind === "D" ? null : file,
+			newFile: kind === "D" ? null : other,
+			isSubmodule: record[1] === "160000" || record[2] === "160000",
 		});
 	}
-	return changes;
+	return { changes, patch: output.slice(start + 2) };
+}
+
+// Git quotes unusual path bytes using C-style escapes, including octal UTF-8 bytes.
+function decodeGitPath(value: string): string | null {
+	if (!value.startsWith('"')) return /["\\\r\n\ufffd]/.test(value) ? null : value;
+	if (!value.endsWith('"')) return null;
+	const bytes: number[] = [];
+	for (let i = 1; i < value.length - 1;) {
+		if (value[i] !== "\\") {
+			if (value[i] === '"') return null;
+			const point = value.codePointAt(i)!;
+			bytes.push(...Buffer.from(String.fromCodePoint(point)));
+			i += point > 0xffff ? 2 : 1;
+			continue;
+		}
+		const escaped = value[i + 1];
+		const simple: Record<string, number> = { '"': 34, "\\": 92, a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13 };
+		if (escaped !== undefined && Object.hasOwn(simple, escaped)) {
+			bytes.push(simple[escaped]);
+			i += 2;
+			continue;
+		}
+		if (!/^[0-7]{3}$/.test(value.slice(i + 1, i + 4))) return null;
+		bytes.push(Number.parseInt(value.slice(i + 1, i + 4), 8));
+		i += 4;
+	}
+	const buffer = Buffer.from(bytes);
+	const decoded = buffer.toString("utf8");
+	return Buffer.from(decoded).equals(buffer) && !decoded.includes("\ufffd") ? decoded : null;
+}
+
+function headerMatches(header: string, oldPath: string, newPath: string): boolean {
+	if (!header.startsWith("diff --git ")) return false;
+	const paths = header.slice("diff --git ".length);
+	for (let i = 1; i < paths.length; i++) {
+		if (paths[i] === " " && decodeGitPath(paths.slice(0, i)) === oldPath && decodeGitPath(paths.slice(i + 1)) === newPath) return true;
+	}
+	return false;
+}
+
+export function verifyPatchChanges(changes: FileChange[], patches: string[]): void {
+	if (changes.length !== patches.length) {
+		throw new Error(`Git metadata and patch disagree (${changes.length} files, ${patches.length} patches); refusing line annotations`);
+	}
+	for (let i = 0; i < changes.length; i++) {
+		const change = changes[i];
+		const oldPath = `a/${change.oldFile ?? change.newFile}`;
+		const newPath = `b/${change.newFile ?? change.oldFile}`;
+		const lines = patches[i].split("\n");
+		if (!headerMatches(lines[0], oldPath, newPath)) {
+			throw new Error(`Git metadata does not match patch ${i + 1}; refusing line annotations`);
+		}
+		// Text patches carry old/new markers; renames without hunks, binaries and mode-only changes may not.
+		const hunk = lines.findIndex((line) => line.startsWith("@@ "));
+		const markers = lines.slice(1, hunk < 0 ? undefined : hunk);
+		const oldMarkers = markers.filter((line) => line.startsWith("--- "));
+		const newMarkers = markers.filter((line) => line.startsWith("+++ "));
+		if ((hunk >= 0 || oldMarkers.length > 0 || newMarkers.length > 0) &&
+			(oldMarkers.length !== 1 || newMarkers.length !== 1 ||
+				decodeGitPath(oldMarkers[0].slice(4).replace(/\t$/, "")) !== (change.oldFile === null ? "/dev/null" : oldPath) ||
+				decodeGitPath(newMarkers[0].slice(4).replace(/\t$/, "")) !== (change.newFile === null ? "/dev/null" : newPath))) {
+			throw new Error(`Git old/new paths do not match patch ${i + 1}; refusing line annotations`);
+		}
+	}
 }
 
 function splitFilePatches(patch: string): string[] {
@@ -154,10 +223,9 @@ function splitFilePatches(patch: string): string[] {
 	return starts.map((start, index) => patch.slice(start, starts[index + 1] ?? patch.length));
 }
 
-function layerArgs(layer: "staged" | "worktree" | "head", nameStatus: boolean): string[] {
-	const args = ["--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=3", "--find-renames"];
+function layerArgs(layer: "staged" | "worktree" | "head"): string[] {
+	const args = ["--no-pager", "diff", "--patch-with-raw", "-z", "--src-prefix=a/", "--dst-prefix=b/", "--no-ext-diff", "--no-textconv", "--no-color", "--ignore-submodules=none", "--submodule=short", "--find-renames"];
 	if (layer === "staged") args.push("--cached", "--root");
-	if (nameStatus) args.push("--name-status", "-z");
 	if (layer === "head") args.push("HEAD");
 	args.push("--");
 	return args;
@@ -191,21 +259,16 @@ function makeSection(change: FileChange, patch: string, layer: string): ReviewSe
 		displayFile,
 		patch,
 		patchHash: createHash("sha256").update(patch).digest("hex"),
+		isSubmodule: change.isSubmodule,
 		rows: [],
 	};
 }
 
 async function collectLayer(root: string, layer: "staged" | "worktree" | "head", budget: SnapshotBudget): Promise<ReviewSection[]> {
-	const [statusText, patch] = await Promise.all([
-		run("git", layerArgs(layer, true), { cwd: root, budget }),
-		run("git", layerArgs(layer, false), { cwd: root, budget }),
-	]);
-	const changes = parseNameStatus(statusText);
+	const { changes, patch } = parseRawPatch(await run("git", layerArgs(layer), { cwd: root, budget }));
 	reserveSections(budget, changes.length);
 	const patches = splitFilePatches(patch);
-	if (changes.length !== patches.length) {
-		throw new Error(`Git file list and patch disagree (${changes.length} files, ${patches.length} patches); refusing line annotations`);
-	}
+	verifyPatchChanges(changes, patches);
 	return changes.map((change, index) => makeSection(change, patches[index], layer));
 }
 
@@ -214,13 +277,17 @@ async function collectUntracked(root: string, budget: SnapshotBudget): Promise<R
 	reserveSections(budget, files.length);
 	const sections: ReviewSection[] = [];
 	for (const file of files) {
-		const patch = await run(
+		const { changes, patch } = parseRawPatch(await run(
 			"git",
-			["--no-pager", "diff", "--no-index", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=3", "--", "/dev/null", file],
+			["--no-pager", "diff", "--no-index", "--patch-with-raw", "-z", "--src-prefix=a/", "--dst-prefix=b/", "--no-ext-diff", "--no-textconv", "--no-color", "--", "/dev/null", file],
 			{ cwd: root, budget, allowedExitCodes: [0, 1] },
-		);
-		if (!patch) continue;
-		sections.push(makeSection({ status: "??", oldFile: null, newFile: file }, patch, "untracked"));
+		));
+		const patches = splitFilePatches(patch);
+		verifyPatchChanges(changes, patches);
+		if (changes.length !== 1 || changes[0].status !== "A" || changes[0].oldFile !== null || changes[0].newFile !== file) {
+			throw new Error(`Git untracked metadata does not match ${file}; refusing line annotations`);
+		}
+		sections.push(makeSection({ ...changes[0], status: "??" }, patches[0], "untracked"));
 	}
 	return sections;
 }
@@ -255,7 +322,7 @@ async function renderWithDelta(section: ReviewSection, width: number, repoRoot: 
 		oldFile: section.oldFile,
 		newFile: section.newFile,
 	});
-	const isSubmodule = /\b160000\b/.test(section.patch) && section.patch.includes("Subproject commit ");
+	const isSubmodule = section.isSubmodule;
 	return {
 		...section,
 		rows: mapped.map((row) => ({

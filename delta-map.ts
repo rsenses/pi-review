@@ -134,6 +134,7 @@ export function mapDeltaRows(
 	if (outputRows.at(-1) === "") outputRows.pop();
 	let sourceIndex = 0;
 	let mismatch = source === null;
+	let tabWidth: number | undefined;
 
 	return outputRows.map((text) => {
 		const parsed = parseDeltaLine(text.replace(/\r$/, ""));
@@ -144,7 +145,18 @@ export function mapDeltaRows(
 			return { text };
 		}
 		sourceIndex++;
-		const sameContent = parsed.content === expected.content;
+		let sameContent = parsed.content === expected.content;
+		if (expected.content.includes("\t")) {
+			// Delta expands tabs to a configurable number of spaces. Infer that width
+			// from the full row, and require the same width throughout this file.
+			const tabs = expected.content.split("\t").length - 1;
+			const width = (parsed.content.length - expected.content.length + tabs) / tabs;
+			const expanded = Number.isInteger(width) && width > 0 && width <= 256 &&
+				expected.content.replaceAll("\t", " ".repeat(width)) === parsed.content;
+			const observedWidth = sameContent ? 0 : expanded ? width : undefined;
+			sameContent = observedWidth !== undefined && (tabWidth === undefined || tabWidth === observedWidth);
+			if (sameContent) tabWidth = observedWidth;
+		}
 		const sameCoordinates = expected.kind === "context"
 			? parsed.oldLine === expected.oldLine && parsed.newLine === expected.newLine
 			: expected.kind === "delete"
