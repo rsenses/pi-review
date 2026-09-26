@@ -1,0 +1,23 @@
+{
+	"name": "pi-review",
+	"private": true,
+	"type": "module",
+	"pi": {
+		"extensions": ["./index.ts"]
+	},
+	"scripts": {
+		"test": "node --experimental-strip-types --test delta-map.test.mjs git-review.test.mjs review-core.test.mjs review-config.test.mjs",
+		"typecheck": "tsc --noEmit",
+		"check": "npm run typecheck && npm test"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": ">=0.87.1",
+		"@earendil-works/pi-tui": ">=0.87.1"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "0.87.1",
+		"@earendil-works/pi-tui": "0.87.1",
+		"@types/node": "24.13.3",
+		"typescript": "5.9.3"
+	}
+}
