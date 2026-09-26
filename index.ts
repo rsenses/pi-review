@@ -5,7 +5,7 @@ import type { ExtensionAPI, ExtensionCommandContext, Theme } from "@earendil-wor
 import type { Component, EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { Editor, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { loadSnapshot, type ReviewSection, type ReviewSnapshot } from "./git-review.ts";
-import { loadReviewPromptAppend } from "./review-config.ts";
+import { loadReviewPromptConfig, type ReviewPromptConfig } from "./review-config.ts";
 import { preserveSelectedBackground, stripTerminalControls } from "./delta-map.ts";
 import {
 	draftTargetKey,
@@ -14,7 +14,6 @@ import {
 	removeDraft,
 	resolveReviewAction,
 	updateDrafts,
-	VALIDATION_FOLLOW_UP,
 	type ResolvedDraft,
 	type ReviewDraft,
 	type ReviewTarget,
@@ -172,7 +171,7 @@ class ReviewScreen implements Component {
 		private readonly done: (result: ReviewResult) => void,
 		snapshot: ReviewSnapshot,
 		drafts: ReviewDraft[],
-		private readonly reviewPromptAppend: string,
+		private readonly reviewPromptConfig: ReviewPromptConfig,
 	) {
 		this.snapshot = snapshot;
 		this.drafts = drafts;
@@ -355,7 +354,7 @@ class ReviewScreen implements Component {
 	}
 
 	private requestSubmissionConfirmation(): void {
-		const decision = resolveReviewAction("send", this.drafts, this.snapshot.sections, this.reviewPromptAppend);
+		const decision = resolveReviewAction("send", this.drafts, this.snapshot.sections, this.reviewPromptConfig);
 		if (decision.kind === "blocked") {
 			this.message = decision.reason === "stale"
 				? `${decision.count} stale anchor(s): remove them with x before sending.`
@@ -386,7 +385,7 @@ class ReviewScreen implements Component {
 				return;
 			}
 			this.snapshot = fresh;
-			const decision = resolveReviewAction("send", this.drafts, fresh.sections, this.reviewPromptAppend);
+			const decision = resolveReviewAction("send", this.drafts, fresh.sections, this.reviewPromptConfig);
 			if (decision.kind === "blocked") {
 				this.message = decision.reason === "stale"
 					? `${decision.count} stale anchor(s): remove them with x before sending.`
@@ -546,9 +545,9 @@ export default function (pi: ExtensionAPI): void {
 				ctx.ui.notify("/review does not accept paths; start Pi inside the repository you want to review.", "warning");
 				return;
 			}
-			let reviewPromptAppend: string;
+			let reviewPromptConfig: ReviewPromptConfig;
 			try {
-				reviewPromptAppend = loadReviewPromptAppend(getAgentDir());
+				reviewPromptConfig = loadReviewPromptConfig(getAgentDir());
 			} catch (error) {
 				ctx.ui.notify(`/review could not read its configuration: ${String(error)}`, "error");
 				return;
@@ -561,7 +560,7 @@ export default function (pi: ExtensionAPI): void {
 				const snapshot = await loadSnapshot(ctx.cwd, width);
 				const drafts = loadDrafts(ctx, snapshot.repoRoot);
 				const result = await ctx.ui.custom<ReviewResult>(
-					(tui, theme, _keybindings, done) => new ReviewScreen(pi, ctx, tui, theme, done, snapshot, drafts, reviewPromptAppend),
+					(tui, theme, _keybindings, done) => new ReviewScreen(pi, ctx, tui, theme, done, snapshot, drafts, reviewPromptConfig),
 				);
 				if (result.action === "submit") {
 					pi.sendUserMessage(result.message, { deliverAs: "followUp" });

@@ -21,19 +21,24 @@ Append `@<tag-or-commit>` to pin a specific Git ref. Pi installs this globally f
 
 Pi packages can execute extension code with Pi's permissions. Review the source before installing.
 
-## Review prompt
+## Prompt configuration
 
 The optional user-level configuration lives at `~/.pi/agent/extensions/pi-review/config.json` (or under the agent directory selected by Pi). In this dotfiles checkout it is stored at `dotfiles/pi/.pi/agent/extensions/pi-review/config.json`, separately from this package repository:
 
 ```json
 {
   "prompt": {
-    "append": "\n\n---\n\nExtra instructions appended to comment reviews."
+    "prepend": null,
+    "append": "\n\n---\n\nExtra instructions for comment reviews.",
+    "comments": null,
+    "validation": null
   }
 }
 ```
 
-`prompt.append` affects only the comment-review follow-up; the no-comments validation message is unchanged. If the file or field is absent, no custom text is appended.
+All four fields are optional and may be `null`. Missing or `null` `prepend`/`append` values do nothing; when provided, they are concatenated verbatim around the comment-review follow-up, so include any desired whitespace or separators. They do not affect validation.
+
+`prompt.comments` replaces the default comment-review instructions; Pi still appends the generated list of file/line comments. If missing or `null`, the existing instructions are used. `prompt.validation` replaces the no-comments validation message; if missing or `null`, the existing default is used.
 
 ## Controls
 

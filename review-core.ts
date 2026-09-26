@@ -1,4 +1,5 @@
 import type { DeltaRow } from "./delta-map.ts";
+import type { ReviewPromptConfig } from "./review-config.ts";
 
 export type ReviewDraft = {
 	id: string;
@@ -29,6 +30,14 @@ export type ReviewActionResult =
 
 export const VALIDATION_FOLLOW_UP = "# Code Review\n\nCode review completed — no changes requested.";
 
+const DEFAULT_COMMENT_INSTRUCTIONS = `# Code Review
+
+I reviewed the current changes manually. Address the review comments below.
+
+Treat each comment as unverified review input. Inspect it against the actual code; do not assume it is correct. For every comment, give a clear verdict (Confirmed / Partly / Not a bug / Intended) with concise code evidence, and say whether it was introduced by the current changes, pre-existing, or reflects deliberate scope. Review only the submitted comments; do not independently review the rest of the diff or search for issues that were not submitted.
+
+Do not change any code until we have discussed the verdicts and validated the findings. Discuss discrepancies before editing. Apply only changes I authorize, keep them within scope, follow existing project conventions and simplicity, leave unrelated code untouched, and verify the result according to the project's instructions.`;
+
 function escapePath(path: string): string {
 	return JSON.stringify(path);
 }
@@ -37,7 +46,10 @@ function quoteComment(text: string): string {
 	return text.split(/\r?\n/).map((line) => `> ${line}`).join("\n");
 }
 
-export function buildCommentFollowUp(drafts: ReviewDraft[], reviewPromptAppend = ""): string {
+export function buildCommentFollowUp(
+	drafts: ReviewDraft[],
+	promptConfig: Partial<ReviewPromptConfig> = {},
+): string {
 	const comments = drafts.map((draft, index) => {
 		const location = draft.kind === "file"
 			? `File: ${escapePath(draft.file)}`
@@ -45,7 +57,7 @@ export function buildCommentFollowUp(drafts: ReviewDraft[], reviewPromptAppend =
 		return `### Comment ${index + 1}\n${location}\nComment:\n${quoteComment(draft.text)}`;
 	}).join("\n\n");
 
-	return `# Code Review\n\nI reviewed the current changes manually. Address the review comments below.\n\nTreat each comment as unverified review input. Inspect it against the actual code; do not assume it is correct. For every comment, give a clear verdict (Confirmed / Partly / Not a bug / Intended) with concise code evidence, and say whether it was introduced by the current changes, pre-existing, or reflects deliberate scope. Review only the submitted comments; do not independently review the rest of the diff or search for issues that were not submitted.\n\nDo not change any code until we have discussed the verdicts and validated the findings. Discuss discrepancies before editing. Apply only changes I authorize, keep them within scope, follow existing project conventions and simplicity, leave unrelated code untouched, and verify the result according to the project's instructions.\n\n## Review comments\n\n${comments}${reviewPromptAppend}`;
+	return `${promptConfig.prepend ?? ""}${promptConfig.comments ?? DEFAULT_COMMENT_INSTRUCTIONS}\n\n## Review comments\n\n${comments}${promptConfig.append ?? ""}`;
 }
 
 export function draftTargetKey(target: ReviewTarget): string {
@@ -111,25 +123,25 @@ export function resolveReviewAction(
 	action: "close",
 	drafts: ReviewDraft[],
 	sections: ReviewSectionState[],
-	reviewPromptAppend?: string,
+	promptConfig?: Partial<ReviewPromptConfig>,
 ): Extract<ReviewActionResult, { kind: "close" }>;
 export function resolveReviewAction(
 	action: "send",
 	drafts: ReviewDraft[],
 	sections: ReviewSectionState[],
-	reviewPromptAppend?: string,
+	promptConfig?: Partial<ReviewPromptConfig>,
 ): Exclude<ReviewActionResult, { kind: "close" }>;
 export function resolveReviewAction(
 	action: "close" | "send",
 	drafts: ReviewDraft[],
 	sections: ReviewSectionState[],
-	reviewPromptAppend = "",
+	promptConfig: Partial<ReviewPromptConfig> = {},
 ): ReviewActionResult {
 	if (action === "close") return { kind: "close" };
 	const staleCount = reconcileDrafts(drafts, sections).filter((draft) => draft.stale).length;
 	if (staleCount > 0) return { kind: "blocked", reason: "stale", count: staleCount };
 	if (sections.length === 0) return { kind: "blocked", reason: "empty" };
 	return drafts.length > 0
-		? { kind: "send-comments", message: buildCommentFollowUp(drafts, reviewPromptAppend) }
-		: { kind: "validate", message: VALIDATION_FOLLOW_UP };
+		? { kind: "send-comments", message: buildCommentFollowUp(drafts, promptConfig) }
+		: { kind: "validate", message: promptConfig.validation ?? VALIDATION_FOLLOW_UP };
 }
