@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { chmodSync, lstatSync, mkdtempSync, mkdirSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { mapDeltaRows, type DeltaRow } from "./delta-map.ts";
 
 const MAX_OUTPUT_BYTES = 24 * 1024 * 1024;
@@ -44,7 +47,7 @@ type SnapshotBudget = {
 type CommandOptions = {
 	cwd: string;
 	budget: SnapshotBudget;
-	input?: string;
+	input?: string | Buffer;
 	allowedExitCodes?: number[];
 };
 
@@ -272,16 +275,65 @@ async function collectLayer(root: string, layer: "staged" | "worktree" | "head",
 	return changes.map((change, index) => makeSection(change, patches[index], layer));
 }
 
+function isDirectorySymlink(root: string, file: string): boolean {
+	const path = join(root, file);
+	return lstatSync(path).isSymbolicLink() && statSync(path).isDirectory();
+}
+
+async function diffDirectorySymlink(root: string, file: string, budget: SnapshotBudget): Promise<{ changes: FileChange[]; patch: string }> {
+	const target = readlinkSync(join(root, file), { encoding: "buffer" });
+	const tempRoot = mkdtempSync(join(tmpdir(), "pi-review-untracked-"));
+	try {
+		const tempFile = resolve(tempRoot, file);
+		const relativeFile = relative(tempRoot, tempFile);
+		if (!relativeFile || relativeFile === ".." || relativeFile.startsWith(`..${sep}`) || isAbsolute(relativeFile)) {
+			throw new Error("Unsafe untracked Git path; refusing line annotations");
+		}
+		mkdirSync(dirname(tempFile), { recursive: true });
+		writeFileSync(tempFile, target, { mode: 0o644 });
+		chmodSync(tempFile, 0o644);
+
+		const { changes, patch } = parseRawPatch(await run(
+			"git",
+			["--no-pager", "diff", "--no-index", "--patch-with-raw", "-z", "--src-prefix=a/", "--dst-prefix=b/", "--no-ext-diff", "--no-textconv", "--no-color", "--", "/dev/null", file],
+			{ cwd: tempRoot, budget, allowedExitCodes: [0, 1] },
+		));
+		const patches = splitFilePatches(patch);
+		verifyPatchChanges(changes, patches);
+		if (changes.length !== 1 || changes[0].status !== "A" || changes[0].oldFile !== null || changes[0].newFile !== file) {
+			throw new Error(`Git untracked metadata does not match ${file}; refusing line annotations`);
+		}
+		const modeLine = /^new file mode 100644$/gm;
+		if ([...patches[0].matchAll(modeLine)].length !== 1) {
+			throw new Error(`Git symlink mode does not match ${file}; refusing line annotations`);
+		}
+		const indexLine = /^index (0+)\.\.([0-9a-f]+)$/m.exec(patches[0]);
+		if (!indexLine) throw new Error(`Git symlink object metadata is missing for ${file}; refusing line annotations`);
+		const objectId = (await run("git", ["hash-object", "--stdin"], { cwd: root, budget, input: target })).trim();
+		if (!/^[0-9a-f]+$/i.test(objectId)) throw new Error(`Git symlink object metadata is malformed for ${file}; refusing line annotations`);
+
+		const symlinkPatch = patches[0]
+			.replace(modeLine, "new file mode 120000")
+			.replace(indexLine[0], `index ${indexLine[1]}..${objectId}`);
+		verifyPatchChanges(changes, [symlinkPatch]);
+		return { changes, patch: symlinkPatch };
+	} finally {
+		rmSync(tempRoot, { recursive: true, force: true });
+	}
+}
+
 async function collectUntracked(root: string, budget: SnapshotBudget): Promise<ReviewSection[]> {
 	const files = splitNul(await run("git", ["--no-pager", "ls-files", "--others", "--exclude-standard", "-z"], { cwd: root, budget }));
 	reserveSections(budget, files.length);
 	const sections: ReviewSection[] = [];
 	for (const file of files) {
-		const { changes, patch } = parseRawPatch(await run(
-			"git",
-			["--no-pager", "diff", "--no-index", "--patch-with-raw", "-z", "--src-prefix=a/", "--dst-prefix=b/", "--no-ext-diff", "--no-textconv", "--no-color", "--", "/dev/null", file],
-			{ cwd: root, budget, allowedExitCodes: [0, 1] },
-		));
+		const { changes, patch } = isDirectorySymlink(root, file)
+			? await diffDirectorySymlink(root, file, budget)
+			: parseRawPatch(await run(
+				"git",
+				["--no-pager", "diff", "--no-index", "--patch-with-raw", "-z", "--src-prefix=a/", "--dst-prefix=b/", "--no-ext-diff", "--no-textconv", "--no-color", "--", "/dev/null", file],
+				{ cwd: root, budget, allowedExitCodes: [0, 1] },
+			));
 		const patches = splitFilePatches(patch);
 		verifyPatchChanges(changes, patches);
 		if (changes.length !== 1 || changes[0].status !== "A" || changes[0].oldFile !== null || changes[0].newFile !== file) {

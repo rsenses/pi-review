@@ -204,6 +204,26 @@ test("renames use old/new paths and untracked or binary files fall back to file 
 	}
 });
 
+test("untracked symlinks to directories retain a verified symlink patch", { skip: !hasDelta }, async () => {
+	const cwd = repo();
+	try {
+		mkdirSync(join(cwd, ".ai", "skills", "starter-kit-upgrade"), { recursive: true });
+		writeFileSync(join(cwd, ".ai", "skills", "starter-kit-upgrade", "SKILL.md"), "instructions\n");
+		writeFileSync(join(cwd, ".git", "info", "exclude"), ".ai/\n");
+		mkdirSync(join(cwd, ".agents", "skills"), { recursive: true });
+		symlinkSync("../../.ai/skills/starter-kit-upgrade", join(cwd, ".agents", "skills", "starter-kit-upgrade"));
+
+		const snapshot = await loadSnapshot(cwd, 100);
+		const link = snapshot.sections.find((section) => section.newFile === ".agents/skills/starter-kit-upgrade");
+		assert.ok(link);
+		assert.match(link.patch, /new file mode 120000/);
+		assert.match(link.patch, /^\+\.\.\/\.\.\/\.ai\/skills\/starter-kit-upgrade$/m);
+		assert.ok(mapped(link, ".agents/skills/starter-kit-upgrade", "new", 1));
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("unborn repositories present staged, unstaged, and untracked changes without mixing anchors", { skip: !hasDelta }, async () => {
 	const cwd = repo();
 	try {
