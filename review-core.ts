@@ -174,6 +174,25 @@ export function sidebarEntries(paths: string[]): SidebarEntry[] {
 	return entries;
 }
 
+/**
+ * Section indices in sidebar tree order. The diff body follows this so navigation, the
+ * sidebar and the diff agree on one order. Sections the tree cannot place (an empty
+ * display path) keep their Git order at the end rather than disappearing.
+ */
+export function sidebarOrder(entries: SidebarEntry[], sectionCount: number): number[] {
+	const seen = new Set<number>();
+	const order: number[] = [];
+	for (const entry of entries) {
+		if (entry.sectionIndex === null || seen.has(entry.sectionIndex)) continue;
+		seen.add(entry.sectionIndex);
+		order.push(entry.sectionIndex);
+	}
+	for (let sectionIndex = 0; sectionIndex < sectionCount; sectionIndex++) {
+		if (!seen.has(sectionIndex)) order.push(sectionIndex);
+	}
+	return order;
+}
+
 export function keepCursorVisible(scrollStart: number, cursor: number, rowCount: number, viewportHeight: number): number {
 	const maxStart = Math.max(0, rowCount - Math.max(viewportHeight, 1));
 	const currentStart = Math.max(0, Math.min(scrollStart, maxStart));

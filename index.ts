@@ -15,6 +15,7 @@ import {
 	resolveReviewAction,
 	reviewLayout,
 	sidebarEntries,
+	sidebarOrder,
 	updateDrafts,
 	type ResolvedDraft,
 	type ReviewDraft,
@@ -184,6 +185,9 @@ class ReviewScreen implements Component {
 	private commentEditor: Editor | null = null;
 	private commentTarget: ReviewTarget | null = null;
 	private snapshot: ReviewSnapshot;
+	private treeFor: ReviewSnapshot | null = null;
+	private treeEntries: SidebarEntry[] = [];
+	private treeOrder: number[] = [];
 
 	constructor(
 		private readonly pi: ExtensionAPI,
@@ -200,6 +204,16 @@ class ReviewScreen implements Component {
 	}
 
 	invalidate(): void {}
+
+	/** Sidebar tree and the section order it implies, rebuilt only when the snapshot changes. */
+	private sidebarTree(): { entries: SidebarEntry[]; order: number[] } {
+		if (this.treeFor !== this.snapshot) {
+			this.treeFor = this.snapshot;
+			this.treeEntries = sidebarEntries(this.snapshot.sections.map((section) => safePlainText(section.displayFile)));
+			this.treeOrder = sidebarOrder(this.treeEntries, this.snapshot.sections.length);
+		}
+		return { entries: this.treeEntries, order: this.treeOrder };
+	}
 
 	private resolvedDrafts(): ResolvedDraft[] {
 		return reconcileDrafts(this.drafts, this.snapshot.sections);
@@ -226,7 +240,9 @@ class ReviewScreen implements Component {
 			rows.push({ kind: "info", id: "empty", text: "No Git changes to review; nothing will be submitted for validation." });
 			return rows;
 		}
-		for (let sectionIndex = 0; sectionIndex < this.snapshot.sections.length; sectionIndex++) {
+		// One order everywhere: the sidebar groups by folder, so the body follows the same
+		// order. Otherwise a new file in an already-modified folder sits mid-tree but last.
+		for (const sectionIndex of this.sidebarTree().order) {
 			const section = this.snapshot.sections[sectionIndex];
 			rows.push({ kind: "file", sectionIndex });
 			const fileTarget: ReviewTarget = {
@@ -548,7 +564,7 @@ class ReviewScreen implements Component {
 		resolved: ResolvedDraft[],
 	): string[] {
 		const sections = this.snapshot.sections;
-		const entries = sidebarEntries(sections.map((section) => safePlainText(section.displayFile)));
+		const { entries } = this.sidebarTree();
 		const counts = new Map<number, { total: number; stale: number }>();
 		for (const draft of resolved) {
 			const sectionIndex = sections.findIndex((section) => section.key === draft.sectionKey);

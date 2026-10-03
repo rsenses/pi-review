@@ -9,6 +9,7 @@ import {
 	resolveReviewAction,
 	reviewLayout,
 	sidebarEntries,
+	sidebarOrder,
 	updateDrafts,
 	VALIDATION_FOLLOW_UP,
 } from "./review-core.ts";
@@ -72,6 +73,30 @@ test("every section stays reachable through exactly one tree entry", () => {
 	const entries = sidebarEntries(paths);
 	assert.deepEqual(entries.filter((e) => !e.isDirectory).map((e) => e.sectionIndex), [0, 1, 2, 3]);
 	assert.deepEqual(entries.filter((e) => e.isDirectory).map((e) => e.sectionIndex), [null, null, null]);
+});
+
+test("the body order follows the tree, so sidebar and diff agree", () => {
+	// src/ is reached first, so its files lead even though index 1 is a root-level file.
+	const paths = ["src/a.ts", "README.md", "src/deep/c.ts", "docs/d.md"];
+	assert.deepEqual(sidebarOrder(sidebarEntries(paths), paths.length), [0, 2, 1, 3]);
+	// Identity when the tree already matches Git order.
+	const flat = ["README.md", "src/a.ts"];
+	assert.deepEqual(sidebarOrder(sidebarEntries(flat), flat.length), [0, 1]);
+});
+
+test("a new file in an already-modified folder lands beside it, not at the end", () => {
+	// Git appends untracked files last, so without tree order the sidebar would show
+	// new.ts under src/ while the diff showed it after everything else.
+	const paths = ["src/old.ts", "README.md", "src/new.ts"];
+	const order = sidebarOrder(sidebarEntries(paths), paths.length);
+	assert.deepEqual(order, [0, 2, 1]);
+	assert.ok(order.indexOf(0) < order.indexOf(2), "old.ts and new.ts stay adjacent");
+});
+
+test("sections the tree cannot place keep their order at the end", () => {
+	const paths = ["src/a.ts", "", "b.ts"];
+	assert.deepEqual(sidebarOrder(sidebarEntries(paths), paths.length), [0, 2, 1]);
+	assert.deepEqual(sidebarOrder([], 3), [0, 1, 2]);
 });
 
 test("root-level files need no directory and empty paths are skipped", () => {
