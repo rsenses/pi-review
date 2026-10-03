@@ -86,6 +86,42 @@ export function removeDraft(drafts: ReviewDraft[], id: string): ReviewDraft[] {
 	return drafts.filter((draft) => draft.id !== id);
 }
 
+export const SIDEBAR_MIN_WIDTH = 18;
+export const SIDEBAR_MAX_WIDTH = 28;
+export const SIDEBAR_SEPARATOR_WIDTH = 1;
+export const SIDEBAR_MIN_TOTAL_WIDTH = 76;
+export const SIDEBAR_MIN_BODY_WIDTH = 48;
+
+export type ReviewLayout = { sidebarWidth: number; bodyWidth: number };
+
+/**
+ * Split the viewport into a file sidebar and a diff body. Narrow terminals keep the
+ * whole width for the diff, because Delta is rendered for the body width and a body
+ * that is too narrow would truncate source lines.
+ */
+export function reviewLayout(totalWidth: number): ReviewLayout {
+	const width = Math.max(1, Math.floor(totalWidth));
+	const full = { sidebarWidth: 0, bodyWidth: width };
+	if (width < SIDEBAR_MIN_TOTAL_WIDTH) return full;
+	const sidebarWidth = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.floor(width * 0.28)));
+	const bodyWidth = width - sidebarWidth - SIDEBAR_SEPARATOR_WIDTH;
+	return bodyWidth < SIDEBAR_MIN_BODY_WIDTH ? full : { sidebarWidth, bodyWidth };
+}
+
+/** Shorten an already plain-text path from the left so the meaningful tail stays visible. */
+export function shortenPath(file: string, maxWidth: number): string {
+	const limit = Math.floor(maxWidth);
+	if (limit <= 0) return "";
+	if (file.length <= limit) return file;
+	if (limit === 1) return "…";
+	const parts = file.split("/");
+	for (let start = 1; start < parts.length; start++) {
+		const candidate = `…/${parts.slice(start).join("/")}`;
+		if (candidate.length <= limit) return candidate;
+	}
+	return `…${file.slice(-(limit - 1))}`;
+}
+
 export function keepCursorVisible(scrollStart: number, cursor: number, rowCount: number, viewportHeight: number): number {
 	const maxStart = Math.max(0, rowCount - Math.max(viewportHeight, 1));
 	const currentStart = Math.max(0, Math.min(scrollStart, maxStart));

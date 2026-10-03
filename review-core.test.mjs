@@ -1,6 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildCommentFollowUp, draftTargetKey, keepCursorVisible, reconcileDrafts, removeDraft, resolveReviewAction, updateDrafts, VALIDATION_FOLLOW_UP } from "./review-core.ts";
+import {
+	buildCommentFollowUp,
+	draftTargetKey,
+	keepCursorVisible,
+	reconcileDrafts,
+	removeDraft,
+	resolveReviewAction,
+	reviewLayout,
+	shortenPath,
+	updateDrafts,
+	VALIDATION_FOLLOW_UP,
+} from "./review-core.ts";
 
 const lineTarget = {
 	kind: "line",
@@ -24,6 +35,29 @@ test("viewport scrolls only when the cursor passes the visible edge", () => {
 	assert.equal(keepCursorVisible(1, 1, 20, 4), 1);
 	assert.equal(keepCursorVisible(1, 0, 20, 4), 0);
 	assert.equal(keepCursorVisible(17, 19, 20, 4), 16);
+});
+
+test("layout gives the diff a sidebar only when both columns stay usable", () => {
+	assert.deepEqual(reviewLayout(40), { sidebarWidth: 0, bodyWidth: 40 });
+	assert.deepEqual(reviewLayout(75), { sidebarWidth: 0, bodyWidth: 75 });
+	assert.deepEqual(reviewLayout(100), { sidebarWidth: 28, bodyWidth: 71 });
+	assert.deepEqual(reviewLayout(200), { sidebarWidth: 28, bodyWidth: 171 });
+	assert.deepEqual(reviewLayout(76), { sidebarWidth: 21, bodyWidth: 54 });
+	for (const width of [76, 90, 100, 200, 500]) {
+		const { sidebarWidth, bodyWidth } = reviewLayout(width);
+		assert.equal(sidebarWidth + bodyWidth + 1, width);
+		assert.ok(sidebarWidth >= 18 && sidebarWidth <= 28, `sidebar width ${sidebarWidth}`);
+		assert.ok(bodyWidth >= 48, `body width ${bodyWidth}`);
+	}
+});
+
+test("paths are shortened from the left so the file name survives", () => {
+	assert.equal(shortenPath("src/a.ts", 12), "src/a.ts");
+	assert.equal(shortenPath("a/very/long/path/to/some/file.ts", 14), "…/some/file.ts");
+	assert.equal(shortenPath("a/very/long/path/to/some/file.ts", 12), "…/file.ts");
+	assert.equal(shortenPath("abcdefghijklmnopqrstuvwxyz", 6), "…vwxyz");
+	assert.equal(shortenPath("a/b.ts", 1), "…");
+	assert.equal(shortenPath("a/b.ts", 0), "");
 });
 
 test("drafts upsert by exact target, retain IDs, and blank edits remove", () => {

@@ -2,6 +2,8 @@
 
 A native Pi code-review extension for Git diffs. `/review` opens a screen for the repository containing Pi's current working directory. It renders normal Delta output and enables line comments only where the Git patch mapping is verified. Drafts are scoped to the current Pi session and repository. Opening or closing the screen sends nothing; `w` requests submission or validation, and `y` confirms after a fresh diff check.
 
+The screen opens as a full-viewport overlay with a sidebar of the changed files on the left, in the same order they appear in the diff, and the diff on the right. Delta is rendered for the width of the diff column, so the sidebar costs nothing in diff space. Terminals narrower than 76 columns drop the sidebar and give the whole width to the diff.
+
 Reviews are bounded to 256 diff sections, 24 MiB per subprocess, 64 MiB total subprocess output, and 60 seconds; exceeding a limit aborts the review instead of showing an incomplete diff. Terminal controls found in source text are displayed as escaped text while Delta's own colors are retained.
 
 ## Requirements
@@ -48,10 +50,13 @@ Compatible Git diff configuration (including algorithm, indent heuristic and con
 ## Controls
 
 - `j`/`k` or arrows: navigate; the viewport scrolls only when the cursor reaches an edge.
+- `h`/`l` or left/right arrows: jump to the previous or next file. The sidebar follows the cursor and marks the current file with `▸`.
 - `c`: add or edit a file/line comment.
 - In the comment editor, `Enter` saves the comment. `Shift+Enter` (or Pi's default `Ctrl+J`) inserts a newline, so the comment can span multiple lines. `Esc` cancels editing.
 - `x`: remove the selected comment. Stale drafts remain visible and must be removed with `x` before sending.
 - `w`: ask to send comments or validation. `y` confirms after a fresh diff check; `n`/`Esc` cancels. `q` closes without sending and preserves drafts.
+
+The sidebar lists one line per changed file, in diff order. A `●N` badge counts the drafts on that file; it turns amber when one of those drafts has a stale anchor.
 
 ## Acknowledgements
 

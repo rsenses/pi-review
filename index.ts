@@ -13,6 +13,8 @@ import {
 	reconcileDrafts,
 	removeDraft,
 	resolveReviewAction,
+	reviewLayout,
+	shortenPath,
 	updateDrafts,
 	type ResolvedDraft,
 	type ReviewDraft,
@@ -138,6 +140,11 @@ function targetFromRow(row: ReviewRow, sections: ReviewSection[]): ReviewTarget 
 	};
 }
 
+function activeSectionIndex(rows: ReviewRow[], cursor: number): number | undefined {
+	const row = rows[cursor];
+	return row && (row.kind === "file" || row.kind === "delta" || row.kind === "comment") ? row.sectionIndex : undefined;
+}
+
 function rowIdentity(row: ReviewRow | undefined, sections: ReviewSection[]): string {
 	if (!row) return "";
 	if (row.kind === "file") return `file:${sections[row.sectionIndex]?.key ?? row.sectionIndex}`;
@@ -156,6 +163,7 @@ class ReviewScreen implements Component {
 	private drafts: ReviewDraft[];
 	private cursor = 0;
 	private scrollOffset = 0;
+	private sidebarScroll = 0;
 	private busy = false;
 	private message = "";
 	private pendingConfirmation: "comments" | "validation" | null = null;
@@ -373,7 +381,7 @@ class ReviewScreen implements Component {
 		this.message = "Checking that the diff has not changed…";
 		this.tui.requestRender();
 		try {
-			const fresh = await loadSnapshot(this.snapshot.repoRoot, this.tui.terminal.columns);
+			const fresh = await loadSnapshot(this.snapshot.repoRoot, reviewLayout(this.tui.terminal.columns).bodyWidth);
 			const changed = fresh.signature !== this.snapshot.signature;
 			const oldIdentity = rowIdentity(this.currentRow(), this.snapshot.sections);
 			if (changed) {
@@ -466,6 +474,7 @@ class ReviewScreen implements Component {
 		const staleCount = resolved.filter((draft) => draft.stale).length;
 		const draftCount = this.drafts.length;
 		const height = Math.max(4, this.tui.terminal.rows);
+		const { sidebarWidth, bodyWidth } = reviewLayout(width);
 		const editorLines = this.commentEditor?.render(width) ?? [];
 		const editorRows = this.commentTarget
 			? [
@@ -491,15 +500,69 @@ class ReviewScreen implements Component {
 		const statusText = this.pendingConfirmation
 			? `Are you sure you want to send ${this.pendingConfirmation === "comments" ? "the comments to the agent" : "the validation"}? y: yes · n/Esc: no`
 			: this.message || (staleCount ? "There are stale anchors; w will not send them." : "");
+		const sidebarLines = sidebarWidth > 0
+			? this.renderSidebar(sidebarWidth, bodyHeight, activeSectionIndex(rows, this.cursor), resolved)
+			: [];
+		const separator = sidebarWidth > 0 ? this.theme.fg("border", "│") : "";
+		const body = visible.map((row, offset) => {
+			const line = truncateToWidth(this.renderRow(row, start + offset === this.cursor, bodyWidth, draftsById), bodyWidth);
+			if (sidebarWidth === 0) return line;
+			const cell = sidebarLines[offset] ?? "";
+			return `${truncateToWidth(cell, sidebarWidth, "", true)}${separator}${line}`;
+		});
 		const rendered = [
-			title,
-			this.theme.fg("muted", summary),
-			...visible.map((row, offset) => this.renderRow(row, start + offset === this.cursor, width, draftsById)),
+			truncateToWidth(title, width),
+			truncateToWidth(this.theme.fg("muted", summary), width),
+			...body,
 			...editorRows,
-			this.theme.fg(this.pendingConfirmation || staleCount ? "warning" : "muted", statusText),
-			this.theme.fg("dim", footer),
+			truncateToWidth(this.theme.fg(this.pendingConfirmation || staleCount ? "warning" : "muted", statusText), width),
+			truncateToWidth(this.theme.fg("dim", footer), width),
 		];
 		return rendered.slice(0, height).map((line) => truncateToWidth(line, width));
+	}
+
+	/** One line per changed file, in diff order, anchored on the section under the cursor. */
+	private renderSidebar(
+		width: number,
+		height: number,
+		active: number | undefined,
+		resolved: ResolvedDraft[],
+	): string[] {
+		const sections = this.snapshot.sections;
+		const indexByKey = new Map(sections.map((section, sectionIndex) => [section.key, sectionIndex] as const));
+		const counts = new Map<number, { total: number; stale: number }>();
+		for (const draft of resolved) {
+			const sectionIndex = indexByKey.get(draft.sectionKey);
+			if (sectionIndex === undefined) continue;
+			const entry = counts.get(sectionIndex) ?? { total: 0, stale: 0 };
+			entry.total++;
+			if (draft.stale) entry.stale++;
+			counts.set(sectionIndex, entry);
+		}
+		const start = active === undefined
+			? Math.min(this.sidebarScroll, Math.max(0, sections.length - height))
+			: keepCursorVisible(this.sidebarScroll, active, sections.length, height);
+		this.sidebarScroll = start;
+		return Array.from({ length: Math.max(0, height) }, (_, offset) => {
+			const sectionIndex = start + offset;
+			const section = sections[sectionIndex];
+			if (!section) return "";
+			const count = counts.get(sectionIndex);
+			const badgeWidth = count && count.total > 0 ? 2 + String(count.total).length : 0;
+			const selected = sectionIndex === active;
+			const label = this.theme.fg(
+				selected ? "accent" : "muted",
+				shortenPath(safePlainText(section.displayFile), Math.max(1, width - 2 - badgeWidth)),
+			);
+			const marker = selected ? this.theme.fg("accent", "▸") : " ";
+			const badge = count && count.total > 0
+				? ` ${this.theme.fg(count.stale > 0 ? "warning" : "success", `●${count.total}`)}`
+				: "";
+			const line = truncateToWidth(`${marker} ${label}${badge}`, width);
+			return selected
+				? this.theme.bg("selectedBg", line + " ".repeat(Math.max(0, width - visibleWidth(line))))
+				: line;
+		});
 	}
 
 	private renderRow(row: ReviewRow, selected: boolean, width: number, draftsById: Map<string, ReviewDraft>): string {
@@ -556,11 +619,16 @@ export default function (pi: ExtensionAPI): void {
 				if (!ctx.sessionManager.getSessionFile()) {
 					ctx.ui.notify("This session is not saved to disk; drafts will only survive while Pi remains open.", "warning");
 				}
+				// Delta renders for the body column, not the whole terminal, because the
+				// file sidebar takes the rest of the width.
 				const width = process.stdout.columns || 100;
-				const snapshot = await loadSnapshot(ctx.cwd, width);
+				const snapshot = await loadSnapshot(ctx.cwd, reviewLayout(width).bodyWidth);
 				const drafts = loadDrafts(ctx, snapshot.repoRoot);
+				// Overlay mode composes against the visible viewport instead of Pi's content
+				// buffer, so the footer and transcript below can never show through the review.
 				const result = await ctx.ui.custom<ReviewResult>(
 					(tui, theme, _keybindings, done) => new ReviewScreen(pi, ctx, tui, theme, done, snapshot, drafts, reviewPromptConfig),
+					{ overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", row: 0, col: 0, margin: 0 } },
 				);
 				if (result.action === "submit") {
 					pi.sendUserMessage(result.message, { deliverAs: "followUp" });
