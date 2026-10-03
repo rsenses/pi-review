@@ -504,8 +504,13 @@ class ReviewScreen implements Component {
 			? this.renderSidebar(sidebarWidth, bodyHeight, activeSectionIndex(rows, this.cursor), resolved)
 			: [];
 		const separator = sidebarWidth > 0 ? this.theme.fg("border", "│") : "";
-		const body = visible.map((row, offset) => {
-			const line = truncateToWidth(this.renderRow(row, start + offset === this.cursor, bodyWidth, draftsById), bodyWidth);
+		// Always emit exactly bodyHeight rows: the overlay is composited into the visible
+		// viewport, so a short diff must pad with blank rows or Pi's transcript shows below it.
+		const body = Array.from({ length: bodyHeight }, (_, offset) => {
+			const row = visible[offset];
+			const line = row
+				? truncateToWidth(this.renderRow(row, start + offset === this.cursor, bodyWidth, draftsById), bodyWidth)
+				: "";
 			if (sidebarWidth === 0) return line;
 			const cell = sidebarLines[offset] ?? "";
 			return `${truncateToWidth(cell, sidebarWidth, "", true)}${separator}${line}`;
