@@ -108,18 +108,70 @@ export function reviewLayout(totalWidth: number): ReviewLayout {
 	return bodyWidth < SIDEBAR_MIN_BODY_WIDTH ? full : { sidebarWidth, bodyWidth };
 }
 
-/** Shorten an already plain-text path from the left so the meaningful tail stays visible. */
-export function shortenPath(file: string, maxWidth: number): string {
-	const limit = Math.floor(maxWidth);
-	if (limit <= 0) return "";
-	if (file.length <= limit) return file;
-	if (limit === 1) return "…";
-	const parts = file.split("/");
-	for (let start = 1; start < parts.length; start++) {
-		const candidate = `…/${parts.slice(start).join("/")}`;
-		if (candidate.length <= limit) return candidate;
+export type SidebarEntry = {
+	depth: number;
+	label: string;
+	isDirectory: boolean;
+	/** Section index for a file entry, or null for a plain directory. */
+	sectionIndex: number | null;
+};
+
+type TreeNode = {
+	name: string;
+	/** null marks a file; a Map marks a directory. */
+	children: Map<string, TreeNode> | null;
+	sectionIndex: number;
+};
+
+function nodeAt(level: Map<string, TreeNode>, name: string, isFile: boolean, sectionIndex: number): TreeNode {
+	const existing = level.get(name);
+	if (!existing) {
+		const node: TreeNode = { name, children: isFile ? null : new Map(), sectionIndex: isFile ? sectionIndex : -1 };
+		level.set(name, node);
+		return node;
 	}
-	return `…${file.slice(-(limit - 1))}`;
+	if (isFile) {
+		existing.children = null;
+		existing.sectionIndex = sectionIndex;
+	} else if (existing.children === null) {
+		// A changed file shares this name with a directory that also holds changes.
+		// Git cannot normally produce this; keep both reachable rather than dropping one.
+		existing.children = new Map();
+	}
+	return existing;
+}
+
+/**
+ * Flatten changed paths into an always-expanded folder tree. Siblings keep the order in
+ * which they first appear in the diff, so the staged-before-untracked grouping survives
+ * at folder level. Labels are single path segments: the folder is implied by nesting.
+ */
+export function sidebarEntries(paths: string[]): SidebarEntry[] {
+	const root = new Map<string, TreeNode>();
+	for (let sectionIndex = 0; sectionIndex < paths.length; sectionIndex++) {
+		const segments = paths[sectionIndex].split("/").filter((segment) => segment.length > 0);
+		if (segments.length === 0) continue;
+		let level = root;
+		for (let depth = 0; depth < segments.length - 1; depth++) {
+			level = nodeAt(level, segments[depth], false, -1).children!;
+		}
+		nodeAt(level, segments[segments.length - 1], true, sectionIndex);
+	}
+	const entries: SidebarEntry[] = [];
+	const walk = (level: Map<string, TreeNode>, depth: number): void => {
+		for (const node of level.values()) {
+			const isDirectory = node.children !== null;
+			entries.push({
+				depth,
+				label: node.name,
+				isDirectory,
+				sectionIndex: isDirectory ? (node.sectionIndex >= 0 ? node.sectionIndex : null) : node.sectionIndex,
+			});
+			if (isDirectory) walk(node.children!, depth + 1);
+		}
+	};
+	walk(root, 0);
+	return entries;
 }
 
 export function keepCursorVisible(scrollStart: number, cursor: number, rowCount: number, viewportHeight: number): number {

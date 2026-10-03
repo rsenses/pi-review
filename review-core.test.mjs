@@ -8,7 +8,7 @@ import {
 	removeDraft,
 	resolveReviewAction,
 	reviewLayout,
-	shortenPath,
+	sidebarEntries,
 	updateDrafts,
 	VALIDATION_FOLLOW_UP,
 } from "./review-core.ts";
@@ -51,13 +51,37 @@ test("layout gives the diff a sidebar only when both columns stay usable", () =>
 	}
 });
 
-test("paths are shortened from the left so the file name survives", () => {
-	assert.equal(shortenPath("src/a.ts", 12), "src/a.ts");
-	assert.equal(shortenPath("a/very/long/path/to/some/file.ts", 14), "…/some/file.ts");
-	assert.equal(shortenPath("a/very/long/path/to/some/file.ts", 12), "…/file.ts");
-	assert.equal(shortenPath("abcdefghijklmnopqrstuvwxyz", 6), "…vwxyz");
-	assert.equal(shortenPath("a/b.ts", 1), "…");
-	assert.equal(shortenPath("a/b.ts", 0), "");
+test("sidebar becomes an expanded folder tree keeping diff order for siblings", () => {
+	assert.deepEqual(sidebarEntries(["src/a.ts", "src/b.ts", "README.md"]), [
+		{ depth: 0, label: "src", isDirectory: true, sectionIndex: null },
+		{ depth: 1, label: "a.ts", isDirectory: false, sectionIndex: 0 },
+		{ depth: 1, label: "b.ts", isDirectory: false, sectionIndex: 1 },
+		{ depth: 0, label: "README.md", isDirectory: false, sectionIndex: 2 },
+	]);
+});
+
+test("a folder appears where the diff first reaches it, even when files interleave", () => {
+	// src/ is first seen at index 0, so it heads the tree even though index 1 is a root file.
+	assert.deepEqual(sidebarEntries(["src/a.ts", "README.md", "src/deep/c.ts"]).map((e) => e.label), [
+		"src", "a.ts", "deep", "c.ts", "README.md",
+	]);
+});
+
+test("every section stays reachable through exactly one tree entry", () => {
+	const paths = ["src/a.ts", "src/nested/b.ts", "docs/c.md", "README.md"];
+	const entries = sidebarEntries(paths);
+	assert.deepEqual(entries.filter((e) => !e.isDirectory).map((e) => e.sectionIndex), [0, 1, 2, 3]);
+	assert.deepEqual(entries.filter((e) => e.isDirectory).map((e) => e.sectionIndex), [null, null, null]);
+});
+
+test("root-level files need no directory and empty paths are skipped", () => {
+	assert.deepEqual(sidebarEntries(["LICENSE"]), [
+		{ depth: 0, label: "LICENSE", isDirectory: false, sectionIndex: 0 },
+	]);
+	assert.deepEqual(sidebarEntries(["", "/", "a.ts"]), [
+		{ depth: 0, label: "a.ts", isDirectory: false, sectionIndex: 2 },
+	]);
+	assert.deepEqual(sidebarEntries([]), []);
 });
 
 test("drafts upsert by exact target, retain IDs, and blank edits remove", () => {

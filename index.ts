@@ -14,11 +14,12 @@ import {
 	removeDraft,
 	resolveReviewAction,
 	reviewLayout,
-	shortenPath,
+	sidebarEntries,
 	updateDrafts,
 	type ResolvedDraft,
 	type ReviewDraft,
 	type ReviewTarget,
+	type SidebarEntry,
 } from "./review-core.ts";
 
 const DRAFT_ENTRY_TYPE = "pi-review.drafts.v1";
@@ -138,6 +139,19 @@ function targetFromRow(row: ReviewRow, sections: ReviewSection[]): ReviewTarget 
 		line: delta.mapping.line,
 		patchHash: section.patchHash,
 	};
+}
+
+function ancestorLines(entries: SidebarEntry[], activeLine: number | undefined): Set<number> {
+	const ancestors = new Set<number>();
+	if (activeLine === undefined) return ancestors;
+	let depth = entries[activeLine].depth;
+	for (let index = activeLine - 1; index >= 0 && depth > 0; index--) {
+		if (entries[index].isDirectory && entries[index].depth === depth - 1) {
+			ancestors.add(index);
+			depth--;
+		}
+	}
+	return ancestors;
 }
 
 function activeSectionIndex(rows: ReviewRow[], cursor: number): number | undefined {
@@ -526,44 +540,55 @@ class ReviewScreen implements Component {
 		return rendered.slice(0, height).map((line) => truncateToWidth(line, width));
 	}
 
-	/** One line per changed file, in diff order, anchored on the section under the cursor. */
+	/** Changed files as an expanded folder tree, anchored on the section under the cursor. */
 	private renderSidebar(
 		width: number,
 		height: number,
-		active: number | undefined,
+		activeSection: number | undefined,
 		resolved: ResolvedDraft[],
 	): string[] {
 		const sections = this.snapshot.sections;
-		const indexByKey = new Map(sections.map((section, sectionIndex) => [section.key, sectionIndex] as const));
+		const entries = sidebarEntries(sections.map((section) => safePlainText(section.displayFile)));
 		const counts = new Map<number, { total: number; stale: number }>();
 		for (const draft of resolved) {
-			const sectionIndex = indexByKey.get(draft.sectionKey);
-			if (sectionIndex === undefined) continue;
+			const sectionIndex = sections.findIndex((section) => section.key === draft.sectionKey);
+			if (sectionIndex < 0) continue;
 			const entry = counts.get(sectionIndex) ?? { total: 0, stale: 0 };
 			entry.total++;
 			if (draft.stale) entry.stale++;
 			counts.set(sectionIndex, entry);
 		}
-		const start = active === undefined
-			? Math.min(this.sidebarScroll, Math.max(0, sections.length - height))
-			: keepCursorVisible(this.sidebarScroll, active, sections.length, height);
+		const lineOfSection = new Map<number, number>();
+		for (let index = 0; index < entries.length; index++) {
+			const sectionIndex = entries[index].sectionIndex;
+			if (sectionIndex !== null && !lineOfSection.has(sectionIndex)) lineOfSection.set(sectionIndex, index);
+		}
+		const activeLine = activeSection === undefined ? undefined : lineOfSection.get(activeSection);
+		const start = activeLine === undefined
+			? Math.min(this.sidebarScroll, Math.max(0, entries.length - height))
+			: keepCursorVisible(this.sidebarScroll, activeLine, entries.length, height);
 		this.sidebarScroll = start;
+		const ancestors = ancestorLines(entries, activeLine);
 		return Array.from({ length: Math.max(0, height) }, (_, offset) => {
-			const sectionIndex = start + offset;
-			const section = sections[sectionIndex];
-			if (!section) return "";
-			const count = counts.get(sectionIndex);
+			const index = start + offset;
+			const entry = entries[index];
+			if (!entry) return "";
+			const selected = index === activeLine;
+			const onPath = selected || ancestors.has(index);
+			const count = entry.sectionIndex === null ? undefined : counts.get(entry.sectionIndex);
 			const badgeWidth = count && count.total > 0 ? 2 + String(count.total).length : 0;
-			const selected = sectionIndex === active;
-			const label = this.theme.fg(
-				selected ? "accent" : "muted",
-				shortenPath(safePlainText(section.displayFile), Math.max(1, width - 2 - badgeWidth)),
+			const indent = "  ".repeat(entry.depth);
+			const label = truncateToWidth(
+				entry.isDirectory ? this.theme.bold(entry.label) : entry.label,
+				Math.max(1, width - 2 - indent.length - badgeWidth),
+				"…",
 			);
 			const marker = selected ? this.theme.fg("accent", "▸") : " ";
+			const color = onPath || entry.isDirectory ? "accent" : "muted";
 			const badge = count && count.total > 0
 				? ` ${this.theme.fg(count.stale > 0 ? "warning" : "success", `●${count.total}`)}`
 				: "";
-			const line = truncateToWidth(`${marker} ${label}${badge}`, width);
+			const line = truncateToWidth(`${marker}${indent}${label}${badge}`, width);
 			return selected
 				? this.theme.bg("selectedBg", line + " ".repeat(Math.max(0, width - visibleWidth(line))))
 				: line;
